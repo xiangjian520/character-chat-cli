@@ -1,0 +1,260 @@
+use log::{error, info};
+use std::sync::Arc;
+use tokio::sync::{broadcast, mpsc};
+use crate::api::ChatMessage;
+use crate::memory::MemoryStore;
+use crate::qq::{api, types::*, QqEvent};
+
+pub struct QqBot {
+    pub app_id: String,
+    pub app_secret: String,
+    pub access_token: String,
+    pub token_expires_at: i64,
+    pub running: bool,
+    sender: mpsc::UnboundedSender<QqEvent>,
+    store: Arc<MemoryStore>,
+    stop_tx: Option<tokio::sync::watch::Sender<bool>>,
+}
+
+impl QqBot {
+    pub fn new(
+        app_id: String,
+        app_secret: String,
+        store: Arc<MemoryStore>,
+        sender: mpsc::UnboundedSender<QqEvent>,
+    ) -> Self {
+        Self {
+            app_id,
+            app_secret,
+            access_token: String::new(),
+            token_expires_at: 0,
+            running: false,
+            sender,
+            store,
+            stop_tx: None,
+        }
+    }
+
+    pub async fn start(
+        &mut self,
+        api_key: String,
+        api_url: String,
+        model: String,
+        max_tokens: u32,
+        temperature: f32,
+        top_p: f32,
+        system_prompt: Option<String>,
+        stop_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<(), String> {
+        if self.running {
+            return Ok(());
+        }
+        self.running = true;
+
+        if let Err(e) = self.refresh_token().await {
+            self.running = false;
+            let _ = self.sender.send(QqEvent::StatusChanged { running: false });
+            let _ = self.sender.send(QqEvent::Error(format!("获取token失败: {}", e)));
+            return Err(format!("获取token失败: {}", e));
+        }
+        let _ = self.sender.send(QqEvent::Token {
+            access_token: self.access_token.clone(),
+        });
+
+        let (internal_tx, _) = broadcast::channel::<QqEvent>(256);
+
+        let access = self.access_token.clone();
+        let token = self.access_token.clone();
+        let intents = INTENT_GROUP_AND_C2C | INTENT_AUDIO_ACTION;
+        let sender_spawn = self.sender.clone();
+        let gateway_stop_rx = stop_rx.clone();
+        let internal_tx_clone = internal_tx.clone();
+
+        let access_for_handler = access.clone();
+        let api_key_for_handler = api_key.clone();
+        let api_url_for_handler = api_url.clone();
+        let model_for_handler = model.clone();
+        let sp_for_handler = system_prompt.clone();
+        let store_for_handler = self.store.clone();
+        let sender_for_handler = self.sender.clone();
+        let mut handler_stop_rx = stop_rx.clone();
+        let mut internal_rx = internal_tx.subscribe();
+
+        tokio::spawn(async move {
+            loop {
+                if *gateway_stop_rx.borrow() {
+                    break;
+                }
+                let sender_c = sender_spawn.clone();
+                let itx = internal_tx_clone.clone();
+                let result = super::ws::run_gateway(
+                    access.clone(),
+                    token.clone(),
+                    intents,
+                    move |event_type, data| {
+                        let event = QqEvent::Raw { event_type, data };
+                        let _ = sender_c.send(event.clone());
+                        let _ = itx.send(event);
+                    },
+                    gateway_stop_rx.clone(),
+                )
+                .await;
+                match result {
+                    Ok(()) => break,
+                    Err(e) => {
+                        error!("[qqbot] 网关断开: {}，3秒后重连", e);
+                        if *gateway_stop_rx.borrow() {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                }
+            }
+        });
+
+        let _ = self.sender.send(QqEvent::StatusChanged { running: true });
+
+        tokio::spawn(async move {
+            let access = access_for_handler;
+            let api_key = api_key_for_handler;
+            let api_url = api_url_for_handler;
+            let model = model_for_handler;
+            let system_prompt = sp_for_handler;
+            let handler_store = store_for_handler;
+            let handler_sender = sender_for_handler;
+            loop {
+                tokio::select! {
+                    _ = handler_stop_rx.changed() => break,
+                    event = internal_rx.recv() => {
+                        match event {
+                            Ok(QqEvent::Raw { event_type, data }) => {
+                                if event_type == "C2C_MESSAGE_CREATE" {
+                                    if let Ok(msg) = serde_json::from_value::<C2cMessageEvent>(data) {
+                                        let from_user = msg.author.as_ref()
+                                            .and_then(|a| {
+                                                if !a.user_openid.is_empty() { Some(a.user_openid.clone()) }
+                                                else if !a.id.is_empty() { Some(a.id.clone()) }
+                                                else { None }
+                                            })
+                                            .unwrap_or_default();
+
+                                        if from_user.is_empty() { continue; }
+                                        let text = msg.content.clone();
+                                        info!("[qqbot] 收到消息 from={}: {}",
+                                            &from_user[..from_user.len().min(20)],
+                                            text.chars().take(50).collect::<String>());
+
+                                        let _ = handler_sender.send(QqEvent::MessageReceived {
+                                            from_user: from_user.clone(),
+                                            text: text.clone(),
+                                        });
+
+                                        if text.trim() == "/clear" {
+                                            handler_store.bot_clear("qq", &from_user);
+                                            let _ = api::send_c2c_message(
+                                                &access, &from_user, "对话已重置", None, None,
+                                            ).await;
+                                            continue;
+                                        }
+
+                                        handler_store.bot_add("qq", &from_user, "user", &text);
+
+                                        let mut messages: Vec<ChatMessage> = Vec::new();
+                                        if let Some(ref sp) = system_prompt {
+                                            messages.push(ChatMessage {
+                                                role: "system".into(),
+                                                content: sp.clone(),
+                                            });
+                                        }
+                                        messages.extend(handler_store.bot_context("qq", &from_user, 20));
+
+                                        match crate::api::send_message_streaming(
+                                            &api_key, &api_url, &model,
+                                            max_tokens, temperature, top_p, messages,
+                                            |_| {},
+                                        ).await {
+                                            Ok(reply) => {
+                                                info!("[qqbot] AI 回复 to={}: {}",
+                                                    &from_user[..from_user.len().min(20)],
+                                                    reply.chars().take(50).collect::<String>());
+                                                handler_store.bot_add("qq", &from_user, "assistant", &reply);
+                                                let _ = api::send_c2c_message(
+                                                    &access, &from_user, &reply, None, None,
+                                                ).await;
+                                                let _ = handler_sender.send(QqEvent::BotReply {
+                                                    to_user: from_user,
+                                                    text: reply,
+                                                });
+                                            }
+                                            Err(e) => {
+                                                let _ = api::send_c2c_message(
+                                                    &access, &from_user,
+                                                    "抱歉，AI 暂时无法回复。", None, None,
+                                                ).await;
+                                                let _ = handler_sender.send(QqEvent::Error(e));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        });
+
+        // Token refresh loop
+        let app_id = self.app_id.clone();
+        let app_secret = self.app_secret.clone();
+        let mut self_expires = self.token_expires_at;
+        let mut stop_rx_token = stop_rx.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+                    _ = stop_rx_token.changed() => break,
+                }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                if now >= self_expires {
+                    match api::get_access_token(&app_id, &app_secret).await {
+                        Ok(resp) => {
+                            self_expires = now + resp.expires_in - 300;
+                            info!("[qqbot] AccessToken 已刷新");
+                        }
+                        Err(e) => {
+                            error!("[qqbot] 刷新token失败: {}", e);
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    pub fn stop(&mut self) {
+        self.running = false;
+        if let Some(tx) = self.stop_tx.take() {
+            let _ = tx.send(true);
+        }
+        let _ = self.sender.send(QqEvent::StatusChanged { running: false });
+    }
+
+    async fn refresh_token(&mut self) -> Result<(), String> {
+        let resp = api::get_access_token(&self.app_id, &self.app_secret).await?;
+        self.access_token = resp.access_token;
+        self.token_expires_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+            + resp.expires_in
+            - 300;
+        info!("[qqbot] AccessToken 已获取");
+        Ok(())
+    }
+}
