@@ -52,6 +52,8 @@ pub struct Config {
     #[serde(default)]
     pub admins: Vec<String>,
     #[serde(default)]
+    pub blacklist: Vec<String>,
+    #[serde(default)]
     pub auto_start_qq: bool,
     #[serde(default)]
     pub auto_start_wechat: bool,
@@ -98,6 +100,7 @@ impl Default for Config {
             onebot_enabled: false,
             onebot_ws_port: default_onebot_port(),
             admins: Vec::new(),
+            blacklist: Vec::new(),
             auto_start_qq: false,
             auto_start_wechat: false,
             auto_start_onebot: false,
@@ -127,6 +130,10 @@ impl Config {
 
     pub fn is_admin(&self, user_id: &str) -> bool {
         self.admins.iter().any(|a| a == user_id)
+    }
+
+    pub fn is_blacklisted(&self, user_id: &str) -> bool {
+        self.blacklist.iter().any(|b| b == user_id)
     }
 
     pub fn load(path: &str) -> Self {

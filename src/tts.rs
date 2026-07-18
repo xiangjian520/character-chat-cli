@@ -87,7 +87,7 @@ impl TtsState {
 pub async fn connect(config: &TtsConfig) -> Result<String, String> {
     let base = config.api_url.trim_end_matches('/');
     let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(180))
         .build()
         .map_err(|e| format!("创建客户端失败: {}", e))?;
 

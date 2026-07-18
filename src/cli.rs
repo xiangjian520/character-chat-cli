@@ -346,6 +346,7 @@ async fn cmd_config(parts: &[String], state: &mut AppState) -> Vec<String> {
                 format!("qq_voice:      {}", if cfg.qq_voice_enabled { "开启" } else { "关闭" }),
                 format!("onebot_port:   {}", cfg.onebot_ws_port),
                 format!("admins:        {:?}", cfg.admins),
+                format!("blacklist:     {:?}", cfg.blacklist),
                 format!("auto_qq:       {}", cfg.auto_start_qq),
                 format!("auto_wechat:   {}", cfg.auto_start_wechat),
                 format!("auto_onebot:   {}", cfg.auto_start_onebot),
@@ -395,6 +396,10 @@ async fn cmd_config(parts: &[String], state: &mut AppState) -> Vec<String> {
                 "admins" => {
                     state.config.admins = value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
                     return vec![format!("管理员列表已更新: {:?}", state.config.admins)];
+                }
+                "blacklist" => {
+                    state.config.blacklist = value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    return vec![format!("黑名单已更新: {:?}", state.config.blacklist)];
                 }
                 "auto_qq" => state.config.auto_start_qq = value == "true" || value == "1" || value == "on",
                 "auto_wechat" => state.config.auto_start_wechat = value == "true" || value == "1" || value == "on",

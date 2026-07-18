@@ -24,6 +24,7 @@ pub struct OneBotHandler {
     sender: mpsc::UnboundedSender<super::ObEvent>,
     pub tts_config: Option<crate::tts::TtsConfig>,
     pub admins: Vec<String>,
+    pub blacklist: Vec<String>,
     pub admin_tx: Option<mpsc::UnboundedSender<cli::AdminCmd>>,
     pub plugin_mgr: Option<Arc<std::sync::Mutex<crate::plugin::PluginManager>>>,
 }
@@ -42,6 +43,7 @@ impl OneBotHandler {
             sender,
             tts_config: None,
             admins: Vec::new(),
+            blacklist: Vec::new(),
             admin_tx: None,
             plugin_mgr: None,
         }
@@ -74,6 +76,11 @@ impl OneBotHandler {
         };
         let group_id = event.group_id;
 
+        let user_id_str = user_id.to_string();
+        if self.blacklist.iter().any(|b| b == &user_id_str) {
+            return;
+        }
+
         let text = event.message.as_ref()
             .map(|m| super::types::extract_text(m))
             .unwrap_or_default();
@@ -82,7 +89,7 @@ impl OneBotHandler {
             return;
         }
 
-        let display_id = format!("ob_{}", user_id);
+        let display_id = format!("ob_{}_{}", user_id, group_id.unwrap_or(0));
         info!("[onebot] 收到消息 user={user_id}, group={:?}, text={}",
             group_id,
             text.chars().take(50).collect::<String>());
@@ -105,7 +112,6 @@ impl OneBotHandler {
 
         // Admin commands
         if let Some(ref admin_tx) = self.admin_tx {
-            let user_id_str = user_id.to_string();
             if let Some(rx) = cli::check_admin_cmd(&user_id_str, &text, &self.admins, admin_tx) {
                 if let Ok(reply) = rx.await {
                     let (action, params) = build_text_msg(user_id, group_id, &reply);
@@ -120,10 +126,10 @@ impl OneBotHandler {
             if let Some(ref pm) = self.plugin_mgr {
                 let ctx = crate::plugin::MessageContext {
                     protocol: "onebot".into(),
-                    user_id: user_id.to_string(),
+                    user_id: user_id_str.clone(),
                     group_id: group_id.map(|g| g.to_string()),
                     text: text.clone(),
-                    is_admin: self.admins.iter().any(|a| a == &user_id.to_string()),
+                    is_admin: self.admins.iter().any(|a| a == &user_id_str),
                 };
                 pm.lock().unwrap().dispatch_message(&ctx)
             } else {
@@ -140,7 +146,10 @@ impl OneBotHandler {
 
         let mut messages: Vec<ChatMessage> = Vec::new();
         if let Some(sp) = system_prompt {
+            info!("[onebot] system_prompt 长度={}, 前50字={}", sp.len(), &sp[..sp.len().min(50)]);
             messages.push(ChatMessage { role: "system".into(), content: sp.to_string() });
+        } else {
+            info!("[onebot] system_prompt 为空/NULL");
         }
         messages.extend(self.store.bot_context("onebot", &display_id, 20));
 
@@ -161,7 +170,7 @@ impl OneBotHandler {
                 if let Some(ref pm) = self.plugin_mgr {
                     let ctx = crate::plugin::MessageContext {
                         protocol: "onebot".into(),
-                        user_id: user_id.to_string(),
+                        user_id: user_id_str.clone(),
                         group_id: group_id.map(|g| g.to_string()),
                         text: String::new(),
                         is_admin: false,
@@ -184,8 +193,10 @@ impl OneBotHandler {
                                         {"type": "record", "data": {"file": format!("base64://{}", b64)}}
                                     ]);
                                     let (va, vp) = build_voice_msg(user_id, group_id, voice_msg);
-                                    if let Err(e) = send_api(&connections, self_id, &build_api(&va, vp)).await {
-                                        warn!("[onebot] 发送语音失败: {}", e);
+                                    info!("[onebot] 发送语音: user={}, group={:?}, action={}", user_id, group_id, va);
+                                    match send_api(&connections, self_id, &build_api(&va, vp)).await {
+                                        Ok(()) => info!("[onebot] 语音发送成功"),
+                                        Err(e) => warn!("[onebot] 发送语音失败: {}", e),
                                     }
                                 }
                                 Err(e) => warn!("[onebot] TTS 生成失败: {}", e),

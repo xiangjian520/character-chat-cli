@@ -17,6 +17,7 @@ pub struct QqBot {
     stop_tx: Option<tokio::sync::watch::Sender<bool>>,
     pub tts_config: Option<crate::tts::TtsConfig>,
     pub admins: Vec<String>,
+    pub blacklist: Vec<String>,
     pub admin_tx: Option<mpsc::UnboundedSender<crate::cli::AdminCmd>>,
     pub plugin_mgr: Option<Arc<std::sync::Mutex<crate::plugin::PluginManager>>>,
 }
@@ -39,6 +40,7 @@ impl QqBot {
             stop_tx: None,
             tts_config: None,
             admins: Vec::new(),
+            blacklist: Vec::new(),
             admin_tx: None,
             plugin_mgr: None,
         }
@@ -90,6 +92,7 @@ impl QqBot {
         let mut internal_rx = internal_tx.subscribe();
         let tts_cfg_for_handler = self.tts_config.clone();
         let admins_for_handler = self.admins.clone();
+        let blacklist_for_handler = self.blacklist.clone();
         let admin_tx_for_handler = self.admin_tx.clone();
         let plugin_mgr_for_handler = self.plugin_mgr.clone();
 
@@ -137,6 +140,7 @@ impl QqBot {
             let handler_sender = sender_for_handler;
             let tts_config = tts_cfg_for_handler;
             let handler_admins = admins_for_handler;
+            let handler_blacklist = blacklist_for_handler;
             let handler_admin_tx = admin_tx_for_handler;
             let plugin_mgr = plugin_mgr_for_handler;
             loop {
@@ -156,6 +160,9 @@ impl QqBot {
                                             .unwrap_or_default();
 
                                         if from_user.is_empty() { continue; }
+                                        if handler_blacklist.iter().any(|b| b == &from_user) {
+                                            continue;
+                                        }
                                         let text = msg.content.clone();
                                         info!("[qqbot] 收到消息 from={}: {}",
                                             &from_user[..from_user.len().min(20)],

@@ -132,6 +132,7 @@ async fn main() {
     let (admin_tx, mut admin_rx) = mpsc::unbounded_channel::<cli::AdminCmd>();
 
     let admins = state.config.admins.clone();
+    let blacklist = state.config.blacklist.clone();
 
     // Reedline setup
     let mut line_editor = Reedline::create();
@@ -282,6 +283,7 @@ async fn main() {
                         None
                     };
                     let admins_clone = admins.clone();
+                    let blacklist_clone = blacklist.clone();
                     let admin_tx_clone = admin_tx.clone();
                     let plugin_mgr_clone = plugin_mgr.clone();
 
@@ -294,6 +296,7 @@ async fn main() {
                         let mut bot = qq::bot::QqBot::new(app_id, app_secret, store, event_tx);
                         bot.tts_config = tts_config;
                         bot.admins = admins_clone;
+                        bot.blacklist = blacklist_clone;
                         bot.admin_tx = Some(admin_tx_clone);
                         bot.plugin_mgr = Some(plugin_mgr_clone);
                         let _ = bot.start(
@@ -340,6 +343,7 @@ async fn main() {
                     let store = state.store.clone();
                     let event_tx = wechat_event_tx.clone();
                     let admins_wx = admins.clone();
+                    let blacklist_wx = blacklist.clone();
                     let admin_tx_wx = admin_tx.clone();
                     let plugin_mgr_wx = plugin_mgr.clone();
 
@@ -351,6 +355,7 @@ async fn main() {
                     tokio::spawn(async move {
                         let mut bot = wechat::bot::WeChatBot::new(creds, store, event_tx);
                         bot.admins = admins_wx;
+                        bot.blacklist = blacklist_wx;
                         bot.admin_tx = Some(admin_tx_wx);
                         bot.plugin_mgr = Some(plugin_mgr_wx);
                         bot.start(
@@ -408,6 +413,7 @@ async fn main() {
                     ob_running.store(true, std::sync::atomic::Ordering::SeqCst);
 
                     let ob_admins = admins.clone();
+                    let ob_blacklist = blacklist.clone();
                     let ob_admin_tx = admin_tx.clone();
                     let ob_plugin_mgr = plugin_mgr.clone();
 
@@ -441,6 +447,7 @@ async fn main() {
                                                 );
                                                 h.tts_config = tts_config.clone();
                                                 h.admins = ob_admins.clone();
+                                                h.blacklist = ob_blacklist.clone();
                                                 h.admin_tx = Some(ob_admin_tx.clone());
                                                 h.plugin_mgr = Some(ob_plugin_mgr.clone());
                                                 handler = Some(h);

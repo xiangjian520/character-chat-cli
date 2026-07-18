@@ -14,6 +14,7 @@ pub struct WeChatBot {
     sender: mpsc::UnboundedSender<WeChatEvent>,
     stop_tx: Option<tokio::sync::watch::Sender<bool>>,
     pub admins: Vec<String>,
+    pub blacklist: Vec<String>,
     pub admin_tx: Option<mpsc::UnboundedSender<crate::cli::AdminCmd>>,
     pub plugin_mgr: Option<Arc<std::sync::Mutex<crate::plugin::PluginManager>>>,
 }
@@ -34,6 +35,7 @@ impl WeChatBot {
             sender,
             stop_tx: None,
             admins: Vec::new(),
+            blacklist: Vec::new(),
             admin_tx: None,
             plugin_mgr: None,
         }
@@ -178,6 +180,10 @@ impl WeChatBot {
             Some(u) if !u.is_empty() => u.clone(),
             _ => return,
         };
+
+        if self.blacklist.iter().any(|b| b == &from_user) {
+            return;
+        }
 
         if let Some(ref ct) = msg.context_token {
             self.context_tokens.insert(from_user.clone(), ct.clone());
