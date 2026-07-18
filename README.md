@@ -111,7 +111,7 @@ personas/
 配置管理员 QQ 号（逗号分隔）：
 
 ```
-/config set admins 1003007712,123456789
+/config set admins 114514114,123456789
 /config save
 ```
 
