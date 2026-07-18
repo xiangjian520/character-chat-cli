@@ -4,7 +4,6 @@ pub const MESSAGE_TYPE_USER: i32 = 1;
 pub const MESSAGE_TYPE_BOT: i32 = 2;
 pub const ITEM_TYPE_TEXT: i32 = 1;
 pub const ITEM_TYPE_IMAGE: i32 = 2;
-pub const ITEM_TYPE_VOICE: i32 = 3;
 pub const ITEM_TYPE_FILE: i32 = 4;
 pub const ITEM_TYPE_VIDEO: i32 = 5;
 pub const MESSAGE_STATE_FINISH: i32 = 2;
@@ -30,19 +29,7 @@ pub struct MessageItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_item: Option<TextItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub voice_item: Option<VoiceItem>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub ref_msg: Option<Box<RefMsg>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VoiceItem {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub voice_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub voice_data: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

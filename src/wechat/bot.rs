@@ -13,6 +13,9 @@ pub struct WeChatBot {
     store: Arc<MemoryStore>,
     sender: mpsc::UnboundedSender<WeChatEvent>,
     stop_tx: Option<tokio::sync::watch::Sender<bool>>,
+    pub admins: Vec<String>,
+    pub admin_tx: Option<mpsc::UnboundedSender<crate::cli::AdminCmd>>,
+    pub plugin_mgr: Option<Arc<std::sync::Mutex<crate::plugin::PluginManager>>>,
 }
 
 impl WeChatBot {
@@ -30,6 +33,9 @@ impl WeChatBot {
             store,
             sender,
             stop_tx: None,
+            admins: Vec::new(),
+            admin_tx: None,
+            plugin_mgr: None,
         }
     }
 
@@ -198,6 +204,35 @@ impl WeChatBot {
             return;
         }
 
+        if let Some(ref admin_tx) = self.admin_tx {
+            if let Some(rx) = crate::cli::check_admin_cmd(&from_user, &text, &self.admins, admin_tx) {
+                if let Ok(reply) = rx.await {
+                    let _ = self.reply(&from_user, &reply).await;
+                }
+                return;
+            }
+        }
+
+        // Plugin hook: on_message
+        let plugin_reply = {
+            if let Some(ref pm) = self.plugin_mgr {
+                let ctx = crate::plugin::MessageContext {
+                    protocol: "wechat".into(),
+                    user_id: from_user.clone(),
+                    group_id: None,
+                    text: text.clone(),
+                    is_admin: self.admins.iter().any(|a| a == &from_user),
+                };
+                pm.lock().unwrap().dispatch_message(&ctx)
+            } else {
+                None
+            }
+        };
+        if let Some(reply) = plugin_reply {
+            let _ = self.reply(&from_user, &reply).await;
+            return;
+        }
+
         self.store.bot_add("wechat", &from_user, "user", &text);
 
         let mut messages: Vec<crate::api::ChatMessage> = Vec::new();
@@ -223,6 +258,17 @@ impl WeChatBot {
                 self.store
                     .bot_add("wechat", &from_user, "assistant", &reply);
                 let _ = self.reply(&from_user, &reply).await;
+
+                if let Some(ref pm) = self.plugin_mgr {
+                    let ctx = crate::plugin::MessageContext {
+                        protocol: "wechat".into(),
+                        user_id: from_user.clone(),
+                        group_id: None,
+                        text: String::new(),
+                        is_admin: false,
+                    };
+                    pm.lock().unwrap().dispatch_reply(&ctx, &reply);
+                }
                 let _ = self.sender.send(WeChatEvent::BotReply {
                     to_user: from_user,
                     text: reply,

@@ -1,9 +1,10 @@
-use log::{error, info};
+use log::{error, info, warn};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use crate::api::ChatMessage;
 use crate::memory::MemoryStore;
 use crate::qq::{api, types::*, QqEvent};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 pub struct QqBot {
     pub app_id: String,
@@ -14,6 +15,10 @@ pub struct QqBot {
     sender: mpsc::UnboundedSender<QqEvent>,
     store: Arc<MemoryStore>,
     stop_tx: Option<tokio::sync::watch::Sender<bool>>,
+    pub tts_config: Option<crate::tts::TtsConfig>,
+    pub admins: Vec<String>,
+    pub admin_tx: Option<mpsc::UnboundedSender<crate::cli::AdminCmd>>,
+    pub plugin_mgr: Option<Arc<std::sync::Mutex<crate::plugin::PluginManager>>>,
 }
 
 impl QqBot {
@@ -32,6 +37,10 @@ impl QqBot {
             sender,
             store,
             stop_tx: None,
+            tts_config: None,
+            admins: Vec::new(),
+            admin_tx: None,
+            plugin_mgr: None,
         }
     }
 
@@ -79,6 +88,10 @@ impl QqBot {
         let sender_for_handler = self.sender.clone();
         let mut handler_stop_rx = stop_rx.clone();
         let mut internal_rx = internal_tx.subscribe();
+        let tts_cfg_for_handler = self.tts_config.clone();
+        let admins_for_handler = self.admins.clone();
+        let admin_tx_for_handler = self.admin_tx.clone();
+        let plugin_mgr_for_handler = self.plugin_mgr.clone();
 
         tokio::spawn(async move {
             loop {
@@ -122,6 +135,10 @@ impl QqBot {
             let system_prompt = sp_for_handler;
             let handler_store = store_for_handler;
             let handler_sender = sender_for_handler;
+            let tts_config = tts_cfg_for_handler;
+            let handler_admins = admins_for_handler;
+            let handler_admin_tx = admin_tx_for_handler;
+            let plugin_mgr = plugin_mgr_for_handler;
             loop {
                 tokio::select! {
                     _ = handler_stop_rx.changed() => break,
@@ -157,6 +174,52 @@ impl QqBot {
                                             continue;
                                         }
 
+                                        if let Some(ref admin_tx) = handler_admin_tx {
+                                            if let Some(rx) = crate::cli::check_admin_cmd(
+                                                &from_user, &text, &handler_admins, admin_tx,
+                                            ) {
+                                                if let Ok(reply) = rx.await {
+                                                let _ = api::send_c2c_message(
+                                                    &access, &from_user, &reply, None, None,
+                                                ).await;
+
+                                                if let Some(ref pm) = plugin_mgr {
+                                                    let ctx = crate::plugin::MessageContext {
+                                                        protocol: "qq".into(),
+                                                        user_id: from_user.clone(),
+                                                        group_id: None,
+                                                        text: String::new(),
+                                                        is_admin: false,
+                                                    };
+                                                    pm.lock().unwrap().dispatch_reply(&ctx, &reply);
+                                                }
+                                                }
+                                                continue;
+                                            }
+                                        }
+
+                                        // Plugin hook: on_message
+                                        let plugin_reply = {
+                                            if let Some(ref pm) = plugin_mgr {
+                                                let ctx = crate::plugin::MessageContext {
+                                                    protocol: "qq".into(),
+                                                    user_id: from_user.clone(),
+                                                    group_id: None,
+                                                    text: text.clone(),
+                                                    is_admin: handler_admins.iter().any(|a| a == &from_user),
+                                                };
+                                                pm.lock().unwrap().dispatch_message(&ctx)
+                                            } else {
+                                                None
+                                            }
+                                        };
+                                        if let Some(reply) = plugin_reply {
+                                            let _ = api::send_c2c_message(
+                                                &access, &from_user, &reply, None, None,
+                                            ).await;
+                                            continue;
+                                        }
+
                                         handler_store.bot_add("qq", &from_user, "user", &text);
 
                                         let mut messages: Vec<ChatMessage> = Vec::new();
@@ -181,6 +244,31 @@ impl QqBot {
                                                 let _ = api::send_c2c_message(
                                                     &access, &from_user, &reply, None, None,
                                                 ).await;
+
+                                                if let Some(ref tts_cfg) = tts_config {
+                                                    if !tts_cfg.ref_audio_path.is_empty() {
+                                                        let reply_clone = reply.clone();
+                                                        let access_clone = access.clone();
+                                                        let from_user_clone = from_user.clone();
+                                                        let tts_cfg_clone = tts_cfg.clone();
+                                                        tokio::spawn(async move {
+                                                            match crate::tts::generate_speech(&tts_cfg_clone, &reply_clone).await {
+                                                                Ok(audio) => {
+                                                                    let b64 = BASE64.encode(&audio);
+                                                                    if let Err(e) = api::send_c2c_voice(
+                                                                        &access_clone, &from_user_clone, &b64, None, None,
+                                                                    ).await {
+                                                                        warn!("[qqbot] 发送语音失败: {}", e);
+                                                                    } else {
+                                                                        info!("[qqbot] 语音消息已发送 to={}", &from_user_clone[..from_user_clone.len().min(20)]);
+                                                                    }
+                                                                }
+                                                                Err(e) => warn!("[qqbot] TTS 生成失败: {}", e),
+                                                            }
+                                                        });
+                                                    }
+                                                }
+
                                                 let _ = handler_sender.send(QqEvent::BotReply {
                                                     to_user: from_user,
                                                     text: reply,

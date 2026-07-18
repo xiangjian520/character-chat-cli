@@ -385,6 +385,7 @@ dependencies = [
  "futures-util",
  "hound",
  "image",
+ "libloading",
  "log",
  "nu-ansi-term",
  "qrcode",

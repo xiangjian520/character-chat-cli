@@ -93,29 +93,6 @@ pub async fn send_text_message(
     text: &str,
     context_token: Option<&str>,
 ) -> Result<(), String> {
-    send_message_inner(base_url, token, to, text, None, context_token).await
-}
-
-pub async fn send_voice_message(
-    base_url: &str,
-    token: &str,
-    to: &str,
-    voice_base64: &str,
-    duration_ms: i64,
-    context_token: Option<&str>,
-) -> Result<(), String> {
-    send_message_inner(base_url, token, to, "", Some((voice_base64, duration_ms)), context_token)
-        .await
-}
-
-async fn send_message_inner(
-    base_url: &str,
-    token: &str,
-    to: &str,
-    text: &str,
-    voice: Option<(&str, i64)>,
-    context_token: Option<&str>,
-) -> Result<(), String> {
     let client_id = format!(
         "bot-{}-{}",
         std::time::SystemTime::now()
@@ -125,23 +102,6 @@ async fn send_message_inner(
         rand::thread_rng().gen_range(100000_u32..999999)
     );
 
-    let mut items: Vec<serde_json::Value> = Vec::new();
-    if !text.is_empty() {
-        items.push(serde_json::json!({
-            "type": ITEM_TYPE_TEXT,
-            "text_item": { "text": text }
-        }));
-    }
-    if let Some((voice_b64, duration)) = voice {
-        items.push(serde_json::json!({
-            "type": ITEM_TYPE_VOICE,
-            "voice": {
-                "voice_data": voice_b64,
-                "duration": duration
-            }
-        }));
-    }
-
     let mut msg = serde_json::json!({
         "msg": {
             "from_user_id": "",
@@ -149,12 +109,13 @@ async fn send_message_inner(
             "client_id": client_id,
             "message_type": MESSAGE_TYPE_BOT,
             "message_state": MESSAGE_STATE_FINISH,
+            "item_list": [{
+                "type": ITEM_TYPE_TEXT,
+                "text_item": { "text": text }
+            }]
         }
     });
 
-    if !items.is_empty() {
-        msg["msg"]["item_list"] = serde_json::json!(items);
-    }
     if let Some(ct) = context_token {
         msg["msg"]["context_token"] = serde_json::json!(ct);
     }

@@ -7,6 +7,37 @@ use crate::wechat;
 use crate::wechat::auth::AuthStatus;
 use qrcode::QrCode;
 use std::sync::Arc;
+use tokio::sync::mpsc;
+
+pub struct AdminCmd {
+    pub protocol: String,
+    pub user_id: String,
+    pub command: String,
+    pub reply_tx: tokio::sync::oneshot::Sender<String>,
+}
+
+/// 检查是否为管理员命令，是则转发到主循环并返回回复通道
+pub fn check_admin_cmd(
+    user_id: &str,
+    text: &str,
+    admins: &[String],
+    admin_tx: &mpsc::UnboundedSender<AdminCmd>,
+) -> Option<tokio::sync::oneshot::Receiver<String>> {
+    if !text.starts_with('/') {
+        return None;
+    }
+    if !admins.iter().any(|a| a == user_id) {
+        return None;
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let _ = admin_tx.send(AdminCmd {
+        protocol: String::new(),
+        user_id: user_id.to_string(),
+        command: text.to_string(),
+        reply_tx: tx,
+    });
+    Some(rx)
+}
 
 pub struct AppState {
     pub config: Config,
@@ -77,6 +108,7 @@ pub async fn handle_command(cmd: &str, state: &mut AppState) -> Vec<String> {
         "/tts" => cmd_tts(&parts, state).await,
         "/wechat" | "/wx" => cmd_wechat(&parts, state).await,
         "/qq" => cmd_qq(state),
+        "/onebot" | "/ob" => cmd_onebot(state),
         "/persona" | "/role" => cmd_persona(&parts, state),
         "/memory" => cmd_memory(&parts, state),
         "/status" => cmd_status(state),
@@ -159,6 +191,12 @@ fn help_text() -> Vec<String> {
         "/qq stop             停止 QQ 机器人".to_string(),
         "/qq status           查看 QQ 状态".to_string(),
         "".to_string(),
+        "── OneBot ──".to_string(),
+        "/onebot start        启动 OneBot WS 服务".to_string(),
+        "/onebot stop         停止 OneBot WS 服务".to_string(),
+        "/onebot status       查看 OneBot 状态".to_string(),
+        "/config set onebot_port <端口> 设置 WS 端口".to_string(),
+        "".to_string(),
         "── 角色 ──".to_string(),
         "/persona list        列出所有角色".to_string(),
         "/persona set <名称>  切换角色".to_string(),
@@ -171,8 +209,8 @@ fn help_text() -> Vec<String> {
 // ─── Chat ───
 
 async fn cmd_chat(parts: &[String], state: &mut AppState) -> Vec<String> {
-    if state.config.api_key.is_empty() {
-        return vec!["错误: 未设置 API Key，请使用 /config set api_key <key> 设置".to_string()];
+    if state.config.api_key().is_empty() {
+        return vec!["错误: 未设置 API Key，请设置环境变量 DEEPSEEK_API_KEY".to_string()];
     }
 
     let (stream, text) = if parts.len() >= 2 && parts[1] == "stream" {
@@ -202,8 +240,9 @@ async fn cmd_chat(parts: &[String], state: &mut AppState) -> Vec<String> {
     if stream {
         println!("\n{}: ", state.config.ai_name);
 
+        let api_key = state.config.api_key();
         match send_message_streaming(
-            &state.config.api_key,
+            &api_key,
             &state.config.api_url,
             &state.config.model,
             state.config.max_tokens,
@@ -235,8 +274,9 @@ async fn cmd_chat(parts: &[String], state: &mut AppState) -> Vec<String> {
             }
         }
     } else {
+        let api_key = state.config.api_key();
         match send_message_async(
-            &state.config.api_key,
+            &api_key,
             &state.config.api_url,
             &state.config.model,
             state.config.max_tokens,
@@ -282,9 +322,14 @@ async fn cmd_config(parts: &[String], state: &mut AppState) -> Vec<String> {
         None | Some("show") => {
             let cfg = &state.config;
             let tts_status = if state.tts.connected { "已连接" } else { "未连接" };
+            let key_display = match cfg.api_key_source() {
+                "config" => format!("{} (配置文件)", mask_key(&cfg.api_key)),
+                "env" => format!("{} (环境变量)", mask_key(&cfg.api_key())),
+                _ => "未设置".to_string(),
+            };
             vec![
                 "═══════ 当前配置 ═══════".to_string(),
-                format!("api_key:       {}...", mask_key(&cfg.api_key)),
+                format!("api_key:       {}", key_display),
                 format!("api_url:       {}", cfg.api_url),
                 format!("model:         {}", cfg.model),
                 format!("max_tokens:    {}", cfg.max_tokens),
@@ -298,6 +343,12 @@ async fn cmd_config(parts: &[String], state: &mut AppState) -> Vec<String> {
                 format!("tts_api_url:   {}", cfg.tts_api_url),
                 format!("tts_auto_play: {}", cfg.tts_auto_play),
                 format!("qq_app_id:     {}", if cfg.qq_app_id.is_empty() { "未设置".to_string() } else { format!("{}...", &cfg.qq_app_id[..cfg.qq_app_id.len().min(8)]) }),
+                format!("qq_voice:      {}", if cfg.qq_voice_enabled { "开启" } else { "关闭" }),
+                format!("onebot_port:   {}", cfg.onebot_ws_port),
+                format!("admins:        {:?}", cfg.admins),
+                format!("auto_qq:       {}", cfg.auto_start_qq),
+                format!("auto_wechat:   {}", cfg.auto_start_wechat),
+                format!("auto_onebot:   {}", cfg.auto_start_onebot),
             ]
         }
         Some("set") => {
@@ -307,7 +358,10 @@ async fn cmd_config(parts: &[String], state: &mut AppState) -> Vec<String> {
             let key = &parts[2];
             let value = parts[3..].join(" ");
             match key.as_str() {
-                "api_key" => state.config.api_key = value,
+                "api_key" => {
+                    state.config.api_key = value;
+                    return vec![format!("API Key 已设置（仅内存），保存时不会写入文件。建议使用环境变量 DEEPSEEK_API_KEY")];
+                }
                 "api_url" => state.config.api_url = value,
                 "model" => state.config.model = value,
                 "max_tokens" => {
@@ -330,6 +384,21 @@ async fn cmd_config(parts: &[String], state: &mut AppState) -> Vec<String> {
                 }
                 "qq_app_id" => state.config.qq_app_id = value,
                 "qq_app_secret" => state.config.qq_app_secret = value,
+                "qq_voice" => {
+                    state.config.qq_voice_enabled = value == "true" || value == "1" || value == "on";
+                    return vec![format!("QQ 语音已{}", if state.config.qq_voice_enabled { "开启" } else { "关闭" })];
+                }
+                "onebot_port" => {
+                    if let Ok(v) = value.parse() { state.config.onebot_ws_port = v; }
+                    else { return vec!["onebot_port 必须是数字".to_string()]; }
+                }
+                "admins" => {
+                    state.config.admins = value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    return vec![format!("管理员列表已更新: {:?}", state.config.admins)];
+                }
+                "auto_qq" => state.config.auto_start_qq = value == "true" || value == "1" || value == "on",
+                "auto_wechat" => state.config.auto_start_wechat = value == "true" || value == "1" || value == "on",
+                "auto_onebot" => state.config.auto_start_onebot = value == "true" || value == "1" || value == "on",
                 _ => return vec![format!("未知配置项: {}", key)],
             }
             vec![format!("已设置 {} = ***", key)]
@@ -422,6 +491,8 @@ async fn cmd_tts(parts: &[String], state: &mut AppState) -> Vec<String> {
                 "api_url" => state.tts.api_url = value.clone(),
                 "ref_audio" => state.tts.ref_audio_path = value.clone(),
                 "prompt_text" => state.tts.prompt_text = value.clone(),
+                "prompt_lang" => state.tts.prompt_lang = value.clone(),
+                "text_lang" => state.tts.text_lang = value.clone(),
                 "gpt_weights" => state.tts.gpt_weights = value.clone(),
                 "sovits_weights" => state.tts.sovits_weights = value.clone(),
                 "speed" => {
@@ -573,10 +644,23 @@ fn cmd_qq(state: &AppState) -> Vec<String> {
     vec![
         format!("QQ 机器人: {}", if state.qq_running { "运行中" } else { "未运行" }),
         format!("App ID:     {}", if state.config.qq_app_id.is_empty() { "未设置" } else { "已设置" }),
+        format!("语音回复:    {}", if state.config.qq_voice_enabled { "开启" } else { "关闭" }),
         "".to_string(),
         "使用 /qq login 配置 AppID 和 Secret".to_string(),
         "使用 /qq start 启动机器人".to_string(),
         "使用 /qq stop 停止机器人".to_string(),
+    ]
+}
+
+// ─── OneBot ───
+
+fn cmd_onebot(state: &AppState) -> Vec<String> {
+    vec![
+        format!("OneBot WS 服务: {}", if state.config.onebot_enabled { "已启用" } else { "未启用" }),
+        format!("WebSocket 端口: {}", state.config.onebot_ws_port),
+        "".to_string(),
+        "使用 /onebot start 启动 OneBot WS 服务".to_string(),
+        "使用 /onebot stop 停止 OneBot WS 服务".to_string(),
     ]
 }
 
@@ -600,6 +684,7 @@ fn cmd_persona(parts: &[String], state: &mut AppState) -> Vec<String> {
             if state.personas.iter().any(|p| &p.name == name) {
                 state.active_persona = name.clone();
                 state.config.persona = name.clone();
+                let _ = state.config.save("config.json");
                 vec![format!("已切换到角色: {}", name)]
             } else {
                 vec![format!("未找到角色: {}", name)]
@@ -617,6 +702,7 @@ fn cmd_memory(parts: &[String], state: &mut AppState) -> Vec<String> {
             state.store.chat_clear();
             state.store.bot_clear_platform("wechat");
             state.store.bot_clear_platform("qq");
+            state.store.bot_clear_platform("onebot");
             vec!["所有对话记忆已清空".to_string()]
         }
         _ => vec!["用法: /memory clear".to_string()],
@@ -629,12 +715,13 @@ fn cmd_status(state: &AppState) -> Vec<String> {
     let chat_count = state.store.chat_count();
     vec![
         "═══════ 系统状态 ═══════".to_string(),
-        format!("API Key:       {}", if state.config.api_key.is_empty() { "未设置" } else { "已设置" }),
+        format!("API Key:       {}", if state.config.api_key().is_empty() { "未设置".to_string() } else { "已设置".to_string() }),
         format!("角色:          {}", state.active_persona),
         format!("TTS:           {}", if state.tts.connected { "已连接" } else { "未连接" }),
         format!("微信:          {}", if state.wechat_logged_in { "已登录" } else { "未登录" }),
         format!("微信机器人:    {}", if state.wechat_running { "运行中" } else { "未运行" }),
         format!("QQ 机器人:     {}", if state.qq_running { "运行中" } else { "未运行" }),
+        format!("QQ 语音:       {}", if state.config.qq_voice_enabled { "开启" } else { "关闭" }),
         format!("聊天历史:      {} 条", chat_count),
     ]
 }

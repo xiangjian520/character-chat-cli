@@ -1,5 +1,7 @@
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use crate::plugin::PluginMeta;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
@@ -41,11 +43,25 @@ pub struct Config {
     pub qq_app_id: String,
     #[serde(default)]
     pub qq_app_secret: String,
+    #[serde(default)]
+    pub qq_voice_enabled: bool,
+    #[serde(default)]
+    pub onebot_enabled: bool,
+    #[serde(default = "default_onebot_port")]
+    pub onebot_ws_port: u16,
+    #[serde(default)]
+    pub admins: Vec<String>,
+    #[serde(default)]
+    pub auto_start_qq: bool,
+    #[serde(default)]
+    pub auto_start_wechat: bool,
+    #[serde(default)]
+    pub auto_start_onebot: bool,
+    #[serde(default)]
+    pub plugins: HashMap<String, PluginMeta>,
 }
 
-fn default_api_key() -> String {
-    std::env::var("DEEPSEEK_API_KEY").unwrap_or_default()
-}
+fn default_api_key() -> String { String::new() }
 fn default_api_url() -> String { "https://api.deepseek.com/v1/chat/completions".into() }
 fn default_model() -> String { "deepseek-chat".into() }
 fn default_max_tokens() -> u32 { 4096 }
@@ -54,6 +70,7 @@ fn default_top_p() -> f32 { 1.0 }
 fn default_user_name() -> String { "我".into() }
 fn default_ai_name() -> String { "AI".into() }
 fn default_tts_sample_steps() -> u32 { 32 }
+fn default_onebot_port() -> u16 { 6700 }
 
 impl Default for Config {
     fn default() -> Self {
@@ -77,11 +94,41 @@ impl Default for Config {
             tts_auto_play: false,
             qq_app_id: String::new(),
             qq_app_secret: String::new(),
+            qq_voice_enabled: false,
+            onebot_enabled: false,
+            onebot_ws_port: default_onebot_port(),
+            admins: Vec::new(),
+            auto_start_qq: false,
+            auto_start_wechat: false,
+            auto_start_onebot: false,
+            plugins: HashMap::new(),
         }
     }
 }
 
 impl Config {
+    pub fn api_key(&self) -> String {
+        if !self.api_key.is_empty() {
+            self.api_key.clone()
+        } else {
+            std::env::var("DEEPSEEK_API_KEY").unwrap_or_default()
+        }
+    }
+
+    pub fn api_key_source(&self) -> &'static str {
+        if !self.api_key.is_empty() {
+            "config"
+        } else if std::env::var("DEEPSEEK_API_KEY").is_ok() {
+            "env"
+        } else {
+            "none"
+        }
+    }
+
+    pub fn is_admin(&self, user_id: &str) -> bool {
+        self.admins.iter().any(|a| a == user_id)
+    }
+
     pub fn load(path: &str) -> Self {
         match std::fs::read_to_string(path) {
             Ok(data) => {
@@ -111,7 +158,9 @@ impl Config {
         if let Some(parent) = std::path::Path::new(path).parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
         }
-        let json = serde_json::to_string_pretty(self).map_err(|e| format!("序列化失败: {}", e))?;
+        let mut cfg = self.clone();
+        cfg.api_key = String::new();
+        let json = serde_json::to_string_pretty(&cfg).map_err(|e| format!("序列化失败: {}", e))?;
         std::fs::write(path, json).map_err(|e| format!("保存失败: {}", e))?;
         info!("配置已保存: {}", path);
         Ok(())
