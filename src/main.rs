@@ -452,9 +452,11 @@ async fn main() {
                         let server_connections = connections.clone();
                         let server_stop_rx = ob_stop_rx.clone();
                         tokio::spawn(async move {
-                            let _ = onebot::server::run_server(
+                            if let Err(e) = onebot::server::run_server(
                                 bind_addr, server_event_tx, server_connections, server_stop_rx,
-                            ).await;
+                            ).await {
+                                eprintln!("[onebot] 服务端错误: {}", e);
+                            }
                         });
 
                         let mut handler: Option<onebot::bot::OneBotHandler> = None;

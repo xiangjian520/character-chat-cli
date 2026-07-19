@@ -33,7 +33,7 @@ pub fn scan_skill_dirs(base: &Path) -> Vec<Persona> {
                     Err(_) => continue,
                 };
                 if prompt.is_empty() {
-                    warn!("[persona] 跳过空内容角色: {}", path.display());
+                    warn!("[persona] 角色文件内容为空，已跳过");
                     continue;
                 }
                 let name = path
@@ -61,7 +61,7 @@ pub fn scan_skill_dirs(base: &Path) -> Vec<Persona> {
                         Err(_) => continue,
                     };
                     if prompt.is_empty() {
-                        warn!("[persona] 跳过空内容角色文件: {}", path.display());
+                        warn!("[persona] 角色文件内容为空，已跳过");
                         continue;
                     }
                     let display_name = std::fs::read_to_string(
