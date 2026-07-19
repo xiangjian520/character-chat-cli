@@ -69,8 +69,8 @@ async fn main() {
     println!("║  ╚██████╗██║  ██║██║  ██║██║  ██║██║  ██║ ║");
     println!("║   ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ║");
     println!("║                                           ║");
-    println!("║        Character-Chat CLI v0.1.1          ║");
-    println!("║        欢迎使用AI角色扮演对话客户端        ║");
+    println!("║         Character-Chat CLI v0.1.1        ║");
+    println!("║        欢迎使用AI角色扮演对话客户端      ║");
     println!("║                                           ║");
     println!("╚═══════════════════════════════════════════╝");
     println!();
