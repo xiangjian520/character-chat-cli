@@ -59,9 +59,13 @@ pub struct Config {
     pub auto_start_wechat: bool,
     #[serde(default)]
     pub auto_start_onebot: bool,
+    #[serde(default = "default_redis_url")]
+    pub redis_url: String,
     #[serde(default)]
     pub plugins: HashMap<String, PluginMeta>,
 }
+
+fn default_redis_url() -> String { "redis://127.0.0.1:6379".into() }
 
 fn default_api_key() -> String { String::new() }
 fn default_api_url() -> String { "https://api.deepseek.com/v1/chat/completions".into() }
@@ -104,6 +108,7 @@ impl Default for Config {
             auto_start_qq: false,
             auto_start_wechat: false,
             auto_start_onebot: false,
+            redis_url: default_redis_url(),
             plugins: HashMap::new(),
         }
     }

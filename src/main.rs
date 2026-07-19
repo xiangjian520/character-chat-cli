@@ -68,23 +68,30 @@ async fn main() {
     println!("输入 /help 查看命令列表");
 
     let config = Config::load("config.json");
-    let store = Arc::new(MemoryStore::open("data/deepseek_chat.db").unwrap_or_else(|e| {
-        eprintln!("警告: 数据库初始化失败: {}", e);
-        MemoryStore::open("data/deepseek_chat.db").expect("无法初始化数据库")
+    let redis_url = config.redis_url.clone();
+
+    println!("[init] 检测 Redis 连接: {} ...", redis_url);
+    let store = Arc::new(MemoryStore::open(&redis_url).unwrap_or_else(|e| {
+        eprintln!("\n  Redis 连接失败!");
+        eprintln!("  地址: {}", redis_url);
+        eprintln!("  原因: {}", e);
+        eprintln!("\n  请确认:");
+        eprintln!("    1. Redis 服务已启动 (systemctl start redis / redis-server)");
+        eprintln!("    2. 地址端口正确 (/config set redis_url <url>)");
+        eprintln!("    3. 防火墙允许连接\n");
+        std::process::exit(1);
     }));
+    println!("[init] Redis 连接正常");
 
-    let mut state = AppState::new(config, store);
-
-    // Plugin system
+    // Plugin system (loaded before state so it can be passed in)
     let mut plugin_mgr = plugin::PluginManager::new();
     let factories = plugins::factory_list();
-    if let Err(e) = plugin_mgr.load_static(&factories, &state.config.plugins) {
+    if let Err(e) = plugin_mgr.load_static(&factories, &config.plugins) {
         eprintln!("[plugin] 编译时插件加载失败: {}", e);
     }
-    match plugin_mgr.load_dynamic(std::path::Path::new("plugins"), &state.config.plugins) {
+    match plugin_mgr.load_dynamic(std::path::Path::new("plugins"), &config.plugins) {
         Ok(loaded) => {
             if loaded.is_empty() {
-                // 检查 plugins 目录是否存在
                 let dir = std::path::Path::new("plugins");
                 if !dir.is_dir() {
                     eprintln!("[plugin] plugins/ 目录不存在，跳过动态插件");
@@ -105,6 +112,8 @@ async fn main() {
             eprintln!("{}", msg);
         }
     }
+
+    let mut state = AppState::new(config, store, plugin_mgr);
 
     if let Some(creds) = wechat::auth::load_saved_credentials() {
         state.wechat_logged_in = true;
@@ -285,7 +294,7 @@ async fn main() {
                     let admins_clone = admins.clone();
                     let blacklist_clone = blacklist.clone();
                     let admin_tx_clone = admin_tx.clone();
-                    let plugin_mgr_clone = plugin_mgr.clone();
+                    let plugin_mgr_clone = state.plugin_mgr.clone();
 
                     let (qq_stop, qq_stop_rx) = tokio::sync::watch::channel(false);
                     qq_stop_tx = Some(qq_stop);
@@ -345,7 +354,7 @@ async fn main() {
                     let admins_wx = admins.clone();
                     let blacklist_wx = blacklist.clone();
                     let admin_tx_wx = admin_tx.clone();
-                    let plugin_mgr_wx = plugin_mgr.clone();
+                    let plugin_mgr_wx = state.plugin_mgr.clone();
 
                     let (wx_stop, wx_stop_rx) = tokio::sync::watch::channel(false);
                     wechat_stop_tx = Some(wx_stop);
@@ -415,7 +424,7 @@ async fn main() {
                     let ob_admins = admins.clone();
                     let ob_blacklist = blacklist.clone();
                     let ob_admin_tx = admin_tx.clone();
-                    let ob_plugin_mgr = plugin_mgr.clone();
+                    let ob_plugin_mgr = state.plugin_mgr.clone();
 
                     tokio::spawn(async move {
                         let (inner_tx, mut inner_rx) = mpsc::unbounded_channel::<onebot::types::OneBotEvent>();

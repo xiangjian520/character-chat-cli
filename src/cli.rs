@@ -2,11 +2,12 @@ use crate::api::{send_message_async, send_message_streaming, ChatMessage};
 use crate::config::Config;
 use crate::memory::MemoryStore;
 use crate::persona::{Persona, scan_skill_dirs};
+use crate::plugin::PluginManager;
 use crate::tts::{self, TtsState};
 use crate::wechat;
 use crate::wechat::auth::AuthStatus;
 use qrcode::QrCode;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 pub struct AdminCmd {
@@ -53,10 +54,11 @@ pub struct AppState {
     pub wechat_qr_image: Option<String>,
     pub qq_running: bool,
     pub running: bool,
+    pub plugin_mgr: Arc<Mutex<PluginManager>>,
 }
 
 impl AppState {
-    pub fn new(config: Config, store: Arc<MemoryStore>) -> Self {
+    pub fn new(config: Config, store: Arc<MemoryStore>, plugin_mgr: Arc<Mutex<PluginManager>>) -> Self {
         let personas = scan_skill_dirs(std::path::Path::new("."));
         let tts = TtsState::from_config(&config);
         let active_persona = if config.persona.is_empty() {
@@ -78,6 +80,7 @@ impl AppState {
             wechat_qr_image: None,
             qq_running: false,
             running: true,
+            plugin_mgr,
         }
     }
 
@@ -101,6 +104,7 @@ pub async fn handle_command(cmd: &str, state: &mut AppState) -> Vec<String> {
             state.running = false;
             vec!["再见!".to_string()]
         }
+        "/restart" => cmd_restart(state),
 
         "/chat" => cmd_chat(&parts, state).await,
         "/clear" => cmd_clear(state),
@@ -157,10 +161,16 @@ fn help_text() -> Vec<String> {
     vec![
         "═══════════ Character-Chat CLI 帮助 ═══════════════".to_string(),
         "".to_string(),
+        "/help | /?           显示此帮助".to_string(),
+        "/exit | /quit        退出程序".to_string(),
+        "/restart             重启程序（重新加载配置与数据库）".to_string(),
+        "".to_string(),
+        "── 对话 ──".to_string(),
         "/chat <消息>         发送消息给 AI（流式输出）".to_string(),
         "/chat stream <消息>  流式输出 AI 回复".to_string(),
         "/clear               清空聊天历史".to_string(),
         "/status              显示当前状态".to_string(),
+        "/memory clear        清空所有对话记忆".to_string(),
         "".to_string(),
         "── 配置 ──".to_string(),
         "/config              显示当前配置".to_string(),
@@ -200,9 +210,6 @@ fn help_text() -> Vec<String> {
         "── 角色 ──".to_string(),
         "/persona list        列出所有角色".to_string(),
         "/persona set <名称>  切换角色".to_string(),
-        "".to_string(),
-        "── 记忆 ──".to_string(),
-        "/memory clear        清空所有对话记忆".to_string(),
     ]
 }
 
@@ -315,6 +322,52 @@ fn cmd_clear(state: &mut AppState) -> Vec<String> {
     vec!["聊天历史已清空".to_string()]
 }
 
+fn cmd_restart(state: &mut AppState) -> Vec<String> {
+    let config = Config::load("config.json");
+    match MemoryStore::open(&config.redis_url) {
+        Ok(new_store) => {
+            let personas = scan_skill_dirs(std::path::Path::new("."));
+            let tts = TtsState::from_config(&config);
+            let active_persona = if config.persona.is_empty() {
+                "none".to_string()
+            } else {
+                config.persona.clone()
+            };
+
+            // Reload plugins
+            let factories = crate::plugins::factory_list();
+            let mut new_mgr = PluginManager::new();
+            if let Err(e) = new_mgr.load_static(&factories, &config.plugins) {
+                eprintln!("[plugin] 编译时插件加载失败: {}", e);
+            }
+            match new_mgr.load_dynamic(std::path::Path::new("plugins"), &config.plugins) {
+                Ok(loaded) => {
+                    if !loaded.is_empty() {
+                        eprintln!("[plugin] 已加载 {} 个动态插件", loaded.len());
+                    }
+                }
+                Err(e) => eprintln!("[plugin] 扫描失败: {}", e),
+            }
+            {
+                let mut old_mgr = state.plugin_mgr.lock().unwrap();
+                old_mgr.stop_all();
+            }
+            for msg in new_mgr.start_all() {
+                eprintln!("{}", msg);
+            }
+            *state.plugin_mgr.lock().unwrap() = new_mgr;
+
+            state.config = config;
+            state.store = Arc::new(new_store);
+            state.personas = personas;
+            state.active_persona = active_persona;
+            state.tts = tts;
+            vec!["程序已重启, 配置、Redis、插件已重新加载".to_string()]
+        }
+        Err(e) => vec![format!("重启失败, Redis 连接异常: {}", e)],
+    }
+}
+
 // ─── Config ───
 
 async fn cmd_config(parts: &[String], state: &mut AppState) -> Vec<String> {
@@ -350,6 +403,7 @@ async fn cmd_config(parts: &[String], state: &mut AppState) -> Vec<String> {
                 format!("auto_qq:       {}", cfg.auto_start_qq),
                 format!("auto_wechat:   {}", cfg.auto_start_wechat),
                 format!("auto_onebot:   {}", cfg.auto_start_onebot),
+                format!("redis_url:     {}", cfg.redis_url),
             ]
         }
         Some("set") => {
@@ -404,6 +458,7 @@ async fn cmd_config(parts: &[String], state: &mut AppState) -> Vec<String> {
                 "auto_qq" => state.config.auto_start_qq = value == "true" || value == "1" || value == "on",
                 "auto_wechat" => state.config.auto_start_wechat = value == "true" || value == "1" || value == "on",
                 "auto_onebot" => state.config.auto_start_onebot = value == "true" || value == "1" || value == "on",
+                "redis_url" => state.config.redis_url = value,
                 _ => return vec![format!("未知配置项: {}", key)],
             }
             vec![format!("已设置 {} = ***", key)]
@@ -418,6 +473,7 @@ async fn cmd_config(parts: &[String], state: &mut AppState) -> Vec<String> {
             *state = AppState::new(
                 Config::load("config.json"),
                 state.store.clone(),
+                state.plugin_mgr.clone(),
             );
             vec!["配置已重新加载".to_string()]
         }

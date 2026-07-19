@@ -1,147 +1,93 @@
-use rusqlite::{params, Connection};
+use redis::{Commands, Connection};
 use std::sync::Mutex;
 use crate::api::ChatMessage;
 
 pub struct MemoryStore {
-    db: Mutex<Connection>,
+    conn: Mutex<Connection>,
 }
 
 impl MemoryStore {
-    pub fn open(path: &str) -> Result<Self, String> {
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("创建 data 目录失败: {}", e))?;
-        }
-        let db = Connection::open(path).map_err(|e| format!("打开数据库失败: {}", e))?;
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
-            .map_err(|e| format!("设置 WAL 模式失败: {}", e))?;
-        let store = Self { db: Mutex::new(db) };
-        store.init_tables()?;
-        Ok(store)
+    pub fn open(redis_url: &str) -> Result<Self, String> {
+        let client = redis::Client::open(redis_url)
+            .map_err(|e| format!("Redis URL 解析失败: {}", e))?;
+        let mut conn = client.get_connection()
+            .map_err(|e| format!("连接 Redis 失败: {}", e))?;
+        redis::cmd("PING").query::<String>(&mut conn)
+            .map_err(|e| format!("Redis 存活检测失败 (PING): {}", e))?;
+        Ok(Self { conn: Mutex::new(conn) })
     }
 
-    pub fn init_tables(&self) -> Result<(), String> {
-        let db = self.db.lock().unwrap();
-        db.execute_batch(
-            "CREATE TABLE IF NOT EXISTS chat_messages (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                role        TEXT NOT NULL,
-                content     TEXT NOT NULL,
-                created_at  INTEGER NOT NULL DEFAULT (unixepoch())
-            );
-            CREATE TABLE IF NOT EXISTS bot_sessions (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                platform    TEXT NOT NULL,
-                user_id     TEXT NOT NULL,
-                role        TEXT NOT NULL,
-                content     TEXT NOT NULL,
-                created_at  INTEGER NOT NULL DEFAULT (unixepoch())
-            );
-            CREATE INDEX IF NOT EXISTS idx_bot_user
-                ON bot_sessions(platform, user_id, created_at);",
-        )
-        .map_err(|e| format!("初始化数据表失败: {}", e))?;
-        Ok(())
+    fn key_chat() -> &'static str { "chat:messages" }
+    fn key_bot(platform: &str, user_id: &str) -> String {
+        format!("bot:{}:{}", platform, user_id)
     }
+    fn key_bot_pattern(platform: &str) -> String {
+        format!("bot:{}:*", platform)
+    }
+    fn key_bot_all() -> &'static str { "bot:*:*" }
 
     pub fn chat_messages(&self) -> Vec<ChatMessage> {
-        let db = self.db.lock().unwrap();
-        let mut stmt = match db.prepare("SELECT role, content FROM chat_messages ORDER BY id ASC") {
-            Ok(s) => s,
-            Err(_) => return vec![],
-        };
-        stmt.query_map([], |row| {
-            Ok(ChatMessage {
-                role: row.get(0)?,
-                content: row.get(1)?,
-            })
-        })
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default()
+        let mut conn = self.conn.lock().unwrap();
+        let values: Vec<String> = conn.lrange(Self::key_chat(), 0, -1).unwrap_or_default();
+        values.iter().filter_map(|v| serde_json::from_str(v).ok()).collect()
     }
 
     pub fn chat_add(&self, role: &str, content: &str) {
-        let db = self.db.lock().unwrap();
-        db.execute(
-            "INSERT INTO chat_messages (role, content) VALUES (?1, ?2)",
-            params![role, content],
-        )
-        .ok();
+        let mut conn = self.conn.lock().unwrap();
+        let msg = ChatMessage { role: role.to_string(), content: content.to_string() };
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _: Result<(), _> = conn.rpush(Self::key_chat(), json);
+        }
     }
 
     pub fn chat_clear(&self) {
-        let db = self.db.lock().unwrap();
-        db.execute("DELETE FROM chat_messages", []).ok();
+        let mut conn = self.conn.lock().unwrap();
+        let _: Result<(), _> = redis::cmd("DEL").arg(Self::key_chat()).query(&mut *conn);
     }
 
     pub fn chat_count(&self) -> usize {
-        let db = self.db.lock().unwrap();
-        db.query_row("SELECT COUNT(*) FROM chat_messages", [], |row| row.get(0))
-            .unwrap_or(0)
+        let mut conn = self.conn.lock().unwrap();
+        conn.llen(Self::key_chat()).unwrap_or(0)
     }
 
     pub fn bot_context(&self, platform: &str, user_id: &str, limit: usize) -> Vec<ChatMessage> {
-        let db = self.db.lock().unwrap();
-        let mut stmt = match db.prepare(
-            "SELECT role, content FROM (
-                SELECT id, role, content FROM bot_sessions
-                WHERE platform = ?1 AND user_id = ?2
-                ORDER BY id DESC LIMIT ?3
-            ) ORDER BY id ASC",
-        ) {
-            Ok(s) => s,
-            Err(_) => return vec![],
-        };
-        stmt.query_map(params![platform, user_id, limit as i64], |row| {
-            Ok(ChatMessage {
-                role: row.get(0)?,
-                content: row.get(1)?,
-            })
-        })
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default()
+        let mut conn = self.conn.lock().unwrap();
+        let key = Self::key_bot(platform, user_id);
+        let start = -(limit as isize);
+        let values: Vec<String> = conn.lrange(&key, start, -1).unwrap_or_default();
+        values.iter().filter_map(|v| serde_json::from_str(v).ok()).collect()
     }
 
     pub fn bot_add(&self, platform: &str, user_id: &str, role: &str, content: &str) {
-        let db = self.db.lock().unwrap();
-        db.execute(
-            "INSERT INTO bot_sessions (platform, user_id, role, content) VALUES (?1, ?2, ?3, ?4)",
-            params![platform, user_id, role, content],
-        )
-        .ok();
+        let mut conn = self.conn.lock().unwrap();
+        let key = Self::key_bot(platform, user_id);
+        let msg = ChatMessage { role: role.to_string(), content: content.to_string() };
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _: Result<(), _> = conn.rpush(&key, json);
+        }
     }
 
     pub fn bot_clear(&self, platform: &str, user_id: &str) {
-        let db = self.db.lock().unwrap();
-        db.execute(
-            "DELETE FROM bot_sessions WHERE platform = ?1 AND user_id = ?2",
-            params![platform, user_id],
-        )
-        .ok();
+        let mut conn = self.conn.lock().unwrap();
+        let key = Self::key_bot(platform, user_id);
+        let _: Result<(), _> = redis::cmd("DEL").arg(&key).query(&mut *conn);
     }
 
     pub fn bot_clear_platform(&self, platform: &str) {
-        let db = self.db.lock().unwrap();
-        db.execute(
-            "DELETE FROM bot_sessions WHERE platform = ?1",
-            params![platform],
-        )
-        .ok();
+        let mut conn = self.conn.lock().unwrap();
+        let pattern = Self::key_bot_pattern(platform);
+        let keys: Vec<String> = redis::cmd("KEYS").arg(&pattern).query(&mut *conn).unwrap_or_default();
+        if !keys.is_empty() {
+            let _: Result<(), _> = redis::cmd("DEL").arg(keys).query(&mut *conn);
+        }
     }
 
     pub fn bot_prune(&self, max_per_user: usize) {
-        let db = self.db.lock().unwrap();
-        db.execute(
-            "DELETE FROM bot_sessions WHERE id NOT IN (
-                SELECT id FROM bot_sessions AS b1
-                WHERE b1.id IN (
-                    SELECT b2.id FROM bot_sessions AS b2
-                    WHERE b2.platform = b1.platform AND b2.user_id = b1.user_id
-                    ORDER BY b2.created_at DESC
-                    LIMIT ?1
-                )
-            )",
-            params![max_per_user as i64],
-        )
-        .ok();
+        let mut conn = self.conn.lock().unwrap();
+        let keys: Vec<String> = redis::cmd("KEYS").arg(Self::key_bot_all()).query(&mut *conn).unwrap_or_default();
+        let start = -(max_per_user as isize);
+        for key in keys {
+            let _: Result<(), _> = redis::cmd("LTRIM").arg(&key).arg(start).arg(-1).query(&mut *conn);
+        }
     }
 }

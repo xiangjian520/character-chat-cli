@@ -19,7 +19,7 @@ rodio = "0.20"
 hound = "3.5"
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures-util = "0.3"
-rusqlite = { version = "0.31", features = ["bundled"] }
+redis = { version = "0.25", features = ["tokio-comp", "connection-manager"] }
 reedline = "0.37"
 nu-ansi-term = "0.50"
 ratatui = "0.29"
