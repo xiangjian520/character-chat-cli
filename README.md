@@ -155,6 +155,37 @@ personas/
 
 管理员可通过任意接入协议的消息发送 CLI 命令（如 `/status`、`/persona list`、`/restart`），结果直接返回。
 
+## 平台差异
+
+### Linux
+
+编译前需安装系统依赖：
+
+```bash
+# Debian / Ubuntu
+sudo apt install build-essential libssl-dev pkg-config libasound2-dev -y
+
+# RHEL / CentOS / Fedora
+sudo dnf groupinstall "Development Tools"
+sudo dnf install openssl-devel pkg-config alsa-lib-devel -y
+
+# Arch Linux
+sudo pacman -S base-devel openssl pkg-config alsa-lib
+```
+
+动态插件使用 `.so` 后缀，放入 `plugins/` 目录即可自动加载。
+
+若无需 TTS 音频播放（`rodio` / ALSA），可自行在 `Cargo.toml` 中移除相关依赖后编译。
+
+### Windows
+
+- 无需额外系统依赖，可直接编译
+- 动态插件使用 `.dll` 后缀
+- 编译时如遇 `拒绝访问 (os error 5)`，请先关闭已运行的实例：
+  ```
+  taskkill /F /IM character-chat-cli.exe
+  ```
+
 ## 项目结构
 
 ```
