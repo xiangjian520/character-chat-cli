@@ -12,6 +12,8 @@ CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 INSTALL_DIR="${HOME}/character-chat-cli"
 BRANCH="master"
 RELEASE_BUILD=true
+REPO_URL=""
+valid_urls=()
 
 # ─── 镜像源（中国大陆优先） ───
 MIRRORS=(
@@ -178,15 +180,19 @@ clone_repo() {
     rm -rf "$INSTALL_DIR"
 
     # 用最快的 URL 优先，失败则依次回退
-    local try_urls=("$REPO_URL")
+    local try_urls=()
+    if [ -n "$REPO_URL" ]; then
+        try_urls+=("$REPO_URL")
+    fi
     if [ ${#valid_urls[@]} -gt 0 ]; then
-        # 把测速通过的其他 URL 也加入回退列表（去重）
         for u in "${valid_urls[@]}"; do
             [[ "$u" != "$REPO_URL" ]] && try_urls+=("$u")
         done
     fi
-    # GitHub 官方作为最后兜底
-    [[ "$REPO_URL" != "${MIRRORS[-1]}" ]] && try_urls+=("${MIRRORS[-1]}")
+    # 如果没有任何可用 URL，直接把所有镜像塞进去
+    if [ ${#try_urls[@]} -eq 0 ]; then
+        try_urls=("${MIRRORS[@]}")
+    fi
 
     for url in "${try_urls[@]}"; do
         info "尝试: ${url}"
