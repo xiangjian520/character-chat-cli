@@ -1,0 +1,109 @@
+character-chat-cli 打包说明
+===========================
+
+## 文件清单
+
+| 文件 | 说明 |
+|------|------|
+| `CharacterChatCLI-Setup-0.1.1.exe` | Windows 安装程序 (Inno Setup) |
+| `setup.iss` | Inno Setup 编译脚本 (可用 ISCC.exe 重新编译) |
+| `package-linux.sh` | Linux 多格式打包脚本 (在 Linux 上运行) |
+| `docker-build-linux.sh` | 使用 Docker 在 Windows 上交叉编译 Linux 二进制 |
+
+---
+
+## Windows 打包 (Inno Setup)
+
+安装程序已生成，用户双击安装即可：
+- 安装到 `%ProgramFiles%\Character Chat CLI`
+- 程序首次运行会自动生成 `config.json`
+- 卸载时会清理 data/plugins/config.json
+
+如需重新编译安装程序（修改 .iss 后）：
+
+    ISCC.exe setup.iss
+
+或下载 Inno Setup：https://jrsoftware.org/isdl.php
+
+---
+
+## Linux 打包
+
+### 方式一：tar.gz 通用压缩包（推荐，最简单）
+
+在 Linux 机器上执行：
+
+    cargo build --release
+    mkdir -p dist/character-chat-cli-0.1.1
+    cp target/release/character-chat-cli dist/character-chat-cli-0.1.1/
+    cp -r personas dist/character-chat-cli-0.1.1/
+    tar -czf character-chat-cli-0.1.1-linux-x86_64.tar.gz -C dist .
+
+### 方式二：.deb 包 (Debian/Ubuntu)
+
+先安装工具：
+
+    cargo install cargo-deb
+
+在 Cargo.toml 中添加：
+
+    [package.metadata.deb]
+    maintainer = "xiangjian520"
+    copyright = "2026"
+    license-file = ["LICENSE", "0"]
+    depends = "libssl3, libasound2"
+    section = "utils"
+    priority = "optional"
+    assets = [
+        ["personas/*", "usr/share/character-chat-cli/personas/", "644"],
+    ]
+
+然后执行：
+
+    cargo deb
+
+输出文件在 `target/debian/` 目录下。
+
+### 方式三：静态链接二进制 (musl，无运行时依赖)
+
+适合在任意 Linux 发行版上运行，不需要安装任何 so 库：
+
+    rustup target add x86_64-unknown-linux-musl
+    sudo apt install musl-tools      # Debian/Ubuntu
+    # 或 sudo dnf install musl-gcc   # Fedora
+
+    cargo build --release --target x86_64-unknown-linux-musl
+    # 输出: target/x86_64-unknown-linux-musl/release/character-chat-cli
+
+### 方式四：AppImage
+
+    # 下载 appimagetool
+    wget https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+    chmod +x appimagetool-x86_64.AppImage
+
+    # 创建 AppDir 结构
+    mkdir -p AppDir/usr/bin
+    cp target/release/character-chat-cli AppDir/usr/bin/
+    echo -e '[Desktop Entry]\nName=Character Chat CLI\nExec=character-chat-cli\nType=Application\nTerminal=true' > AppDir/character-chat-cli.desktop
+    echo -e '#!/bin/bash\ncd "$(dirname "$0")"\nexec usr/bin/character-chat-cli' > AppDir/AppRun
+    chmod +x AppDir/AppRun
+
+    # 打包
+    ./appimagetool-x86_64.AppImage AppDir character-chat-cli-0.1.1.AppImage
+
+### 方式五：用 Docker 在 Windows 上交叉编译 Linux 包
+
+如果当前只有 Windows 机器，可以用 Docker：
+
+    # 先确保 Docker Desktop 运行
+    bash docker-build-linux.sh
+
+---
+
+## 运行时要求
+
+无论哪种打包方式，运行 character-chat-cli 都需要：
+
+1. **Redis** 服务 (默认连接 `redis://127.0.0.1:6379`)
+2. **DeepSeek API Key** (写在 `config.json` 或设置环境变量 `DEEPSEEK_API_KEY`)
+3. (可选) GPT-SoVITS 服务用于 TTS 语音
