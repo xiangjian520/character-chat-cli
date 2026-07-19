@@ -166,6 +166,17 @@ impl OneBotHandler {
         }
         messages.extend(self.store.bot_context("onebot", &display_id, 20));
 
+        // Ensure messages is never empty to prevent API 400 errors
+        if messages.is_empty() {
+            warn!("[onebot] messages 为空，添加默认 system prompt");
+            messages.push(ChatMessage {
+                role: "system".into(),
+                content: "你是一个友好的AI助手，简洁明了地回答问题。".to_string(),
+            });
+        }
+
+        info!("[onebot] 发送API请求, messages数量={}", messages.len());
+
         match crate::api::send_message_async(
             api_key, api_url, model, max_tokens, temperature, top_p, messages,
         ).await {

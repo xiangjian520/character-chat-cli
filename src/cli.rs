@@ -89,6 +89,12 @@ impl AppState {
             .iter()
             .find(|p| p.name == self.active_persona)
             .map(|p| p.system_prompt.clone())
+            .or_else(|| {
+                self.personas
+                    .iter()
+                    .find(|p| p.name == "none")
+                    .map(|p| p.system_prompt.clone())
+            })
     }
 }
 

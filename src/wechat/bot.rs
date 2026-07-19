@@ -1,4 +1,4 @@
-use log::{error, info};
+use log::{error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -249,6 +249,14 @@ impl WeChatBot {
             });
         }
         messages.extend(self.store.bot_context("wechat", &from_user, 20));
+
+        if messages.is_empty() {
+            warn!("[wechat] messages 为空，添加默认 system prompt");
+            messages.push(crate::api::ChatMessage {
+                role: "system".into(),
+                content: "你是一个友好的AI助手，简洁明了地回答问题。".to_string(),
+            });
+        }
 
         match crate::api::send_message_async(
             api_key, api_url, model, max_tokens, temperature, top_p, messages,

@@ -1,3 +1,4 @@
+use log::warn;
 use std::path::Path;
 
 #[derive(Clone, Debug)]
@@ -32,6 +33,7 @@ pub fn scan_skill_dirs(base: &Path) -> Vec<Persona> {
                     Err(_) => continue,
                 };
                 if prompt.is_empty() {
+                    warn!("[persona] 跳过空内容角色: {}", path.display());
                     continue;
                 }
                 let name = path
@@ -59,6 +61,7 @@ pub fn scan_skill_dirs(base: &Path) -> Vec<Persona> {
                         Err(_) => continue,
                     };
                     if prompt.is_empty() {
+                        warn!("[persona] 跳过空内容角色文件: {}", path.display());
                         continue;
                     }
                     let display_name = std::fs::read_to_string(

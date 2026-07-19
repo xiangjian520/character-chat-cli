@@ -238,6 +238,14 @@ impl QqBot {
                                         }
                                         messages.extend(handler_store.bot_context("qq", &from_user, 20));
 
+                                        if messages.is_empty() {
+                                            warn!("[qqbot] messages 为空，添加默认 system prompt");
+                                            messages.push(ChatMessage {
+                                                role: "system".into(),
+                                                content: "你是一个友好的AI助手，简洁明了地回答问题。".to_string(),
+                                            });
+                                        }
+
                                         match crate::api::send_message_streaming(
                                             &api_key, &api_url, &model,
                                             max_tokens, temperature, top_p, messages,
