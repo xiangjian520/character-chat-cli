@@ -237,6 +237,15 @@ async fn main() {
 
         // Process admin commands from bots
         while let Ok(cmd) = admin_rx.try_recv() {
+            // /onebot stop 需直接操作 stop channel，不能走 handle_command
+            if cmd.command == "/onebot stop" || cmd.command.starts_with("/onebot stop") {
+                ob_running.store(false, std::sync::atomic::Ordering::SeqCst);
+                if let Some(tx) = ob_stop_tx.take() {
+                    let _ = tx.send(true);
+                }
+                let _ = cmd.reply_tx.send("OneBot 已停止".to_string());
+                continue;
+            }
             let results = cli::handle_command(&cmd.command, &mut state).await;
             let reply = results.join("\n");
             let _ = cmd.reply_tx.send(reply);

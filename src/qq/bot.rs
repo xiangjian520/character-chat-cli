@@ -173,7 +173,7 @@ impl QqBot {
                                             text: text.clone(),
                                         });
 
-                                        if text.trim() == "/clear" {
+                                        if text.trim() == "/clear" || text.trim() == "/close" {
                                             handler_store.bot_clear("qq", &from_user);
                                             let _ = api::send_c2c_message(
                                                 &access, &from_user, "对话已重置", None, None,

@@ -103,7 +103,7 @@ impl OneBotHandler {
             raw: serde_json::to_value(&event).unwrap_or_default(),
         });
 
-        if text == "/clear" {
+        if text == "/clear" || text == "/close" {
             self.store.bot_clear("onebot", &display_id);
             let (action, params) = build_text_msg(user_id, group_id, "对话已重置");
             let _ = send_api(&self.connections, self.self_id, &build_api(&action, params)).await;

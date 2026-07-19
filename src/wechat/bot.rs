@@ -204,7 +204,7 @@ impl WeChatBot {
             text: text.clone(),
         });
 
-        if text.trim() == "/clear" {
+        if text.trim() == "/clear" || text.trim() == "/close" {
             self.store.bot_clear("wechat", &from_user);
             let _ = self.reply(&from_user, "对话已重置").await;
             return;
