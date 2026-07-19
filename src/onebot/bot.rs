@@ -96,6 +96,7 @@ impl OneBotHandler {
         if message_type == "group" && self.at_only {
             if let Some(ref raw_msg) = event.message {
                 if !is_at_bot(raw_msg, self.self_id) {
+                    info!("[onebot] 群消息未@机器人, 忽略 group={:?} user={}", group_id, user_id);
                     return;
                 }
             }
