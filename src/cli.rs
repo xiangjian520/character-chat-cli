@@ -422,7 +422,8 @@ async fn cmd_config(parts: &[String], state: &mut AppState) -> Vec<String> {
             match key.as_str() {
                 "api_key" => {
                     state.config.api_key = value;
-                    return vec![format!("API Key 已设置（仅内存），保存时不会写入文件。建议使用环境变量 DEEPSEEK_API_KEY")];
+                    let _ = state.config.save("config.json");
+                    return vec!["API Key 已设置并保存到配置文件".to_string()];
                 }
                 "api_url" => state.config.api_url = value,
                 "model" => state.config.model = value,

@@ -173,8 +173,7 @@ impl Config {
         if let Some(parent) = std::path::Path::new(path).parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
         }
-        let mut cfg = self.clone();
-        cfg.api_key = String::new();
+        let cfg = self.clone();
         let json = serde_json::to_string_pretty(&cfg).map_err(|e| format!("序列化失败: {}", e))?;
         std::fs::write(path, json).map_err(|e| format!("保存失败: {}", e))?;
         info!("配置已保存: {}", path);
