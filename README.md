@@ -1,4 +1,4 @@
-# Character-Chat CLI
+# Character-Chat CLI v0.1.1
 
 基于 DeepSeek API 的 AI 角色扮演对话客户端，支持多协议接入（QQ、微信、OneBot 11）、TTS 语音合成、动态插件系统。
 
