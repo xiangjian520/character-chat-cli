@@ -430,6 +430,7 @@ async fn main() {
                     };
                     let store = state.store.clone();
                     let bind_addr = format!("127.0.0.1:{}", state.config.onebot_ws_port);
+                    let ob_at_only = state.config.onebot_at_only;
                     let ob_tx_for_handler = ob_event_tx.clone();
                     let connections = ob_connections.clone();
 
@@ -473,6 +474,7 @@ async fn main() {
                                                     ob_tx_for_handler.clone(),
                                                 );
                                                 h.tts_config = tts_config.clone();
+                                                h.at_only = ob_at_only;
                                                 h.admins = ob_admins.clone();
                                                 h.blacklist = ob_blacklist.clone();
                                                 h.admin_tx = Some(ob_admin_tx.clone());

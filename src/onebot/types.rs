@@ -99,6 +99,34 @@ pub fn extract_text(message: &serde_json::Value) -> String {
     }
 }
 
+/// 检查群消息是否 @了机器人 (self_id)
+pub fn is_at_bot(message: &serde_json::Value, self_id: i64) -> bool {
+    match message {
+        serde_json::Value::Array(segs) => {
+            segs.iter().any(|seg| {
+                let is_at = seg.get("type")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t == "at")
+                    .unwrap_or(false);
+                if !is_at {
+                    return false;
+                }
+                let target = seg.get("data").and_then(|d| d.get("qq"));
+                match target {
+                    Some(serde_json::Value::String(s)) => {
+                        *s == self_id.to_string() || *s == "all"
+                    }
+                    Some(serde_json::Value::Number(n)) => {
+                        n.as_i64().map(|i| i.to_string() == self_id.to_string()).unwrap_or(false)
+                    }
+                    _ => false,
+                }
+            })
+        }
+        _ => false,
+    }
+}
+
 // ─── Helpers to build message segments ───
 
 pub fn text_segment(text: &str) -> serde_json::Value {

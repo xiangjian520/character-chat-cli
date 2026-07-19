@@ -8,6 +8,7 @@ use crate::cli;
 use crate::memory::MemoryStore;
 use super::server::{send_api, ConnMap};
 use super::types::{ApiRequest, OneBotEvent};
+use super::types::is_at_bot;
 
 fn build_api(action: &str, params: serde_json::Value) -> ApiRequest {
     ApiRequest {
@@ -27,6 +28,7 @@ pub struct OneBotHandler {
     pub blacklist: Vec<String>,
     pub admin_tx: Option<mpsc::UnboundedSender<cli::AdminCmd>>,
     pub plugin_mgr: Option<Arc<std::sync::Mutex<crate::plugin::PluginManager>>>,
+    pub at_only: bool,
 }
 
 impl OneBotHandler {
@@ -46,6 +48,7 @@ impl OneBotHandler {
             blacklist: Vec::new(),
             admin_tx: None,
             plugin_mgr: None,
+            at_only: false,
         }
     }
 
@@ -87,6 +90,15 @@ impl OneBotHandler {
         let text = text.trim().to_string();
         if text.is_empty() {
             return;
+        }
+
+        // 群消息非 @机器人 则忽略 (开关控制)
+        if message_type == "group" && self.at_only {
+            if let Some(ref raw_msg) = event.message {
+                if !is_at_bot(raw_msg, self.self_id) {
+                    return;
+                }
+            }
         }
 
         let display_id = format!("ob_{}_{}", user_id, group_id.unwrap_or(0));

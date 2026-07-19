@@ -50,6 +50,8 @@ pub struct Config {
     #[serde(default = "default_onebot_port")]
     pub onebot_ws_port: u16,
     #[serde(default)]
+    pub onebot_at_only: bool,
+    #[serde(default)]
     pub admins: Vec<String>,
     #[serde(default)]
     pub blacklist: Vec<String>,
@@ -103,6 +105,7 @@ impl Default for Config {
             qq_voice_enabled: false,
             onebot_enabled: false,
             onebot_ws_port: default_onebot_port(),
+            onebot_at_only: false,
             admins: Vec::new(),
             blacklist: Vec::new(),
             auto_start_qq: false,

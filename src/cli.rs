@@ -398,6 +398,7 @@ async fn cmd_config(parts: &[String], state: &mut AppState) -> Vec<String> {
                 format!("qq_app_id:     {}", if cfg.qq_app_id.is_empty() { "未设置".to_string() } else { format!("{}...", &cfg.qq_app_id[..cfg.qq_app_id.len().min(8)]) }),
                 format!("qq_voice:      {}", if cfg.qq_voice_enabled { "开启" } else { "关闭" }),
                 format!("onebot_port:   {}", cfg.onebot_ws_port),
+                format!("onebot_at_only: {}", cfg.onebot_at_only),
                 format!("admins:        {:?}", cfg.admins),
                 format!("blacklist:     {:?}", cfg.blacklist),
                 format!("auto_qq:       {}", cfg.auto_start_qq),
@@ -447,6 +448,7 @@ async fn cmd_config(parts: &[String], state: &mut AppState) -> Vec<String> {
                     if let Ok(v) = value.parse() { state.config.onebot_ws_port = v; }
                     else { return vec!["onebot_port 必须是数字".to_string()]; }
                 }
+                "onebot_at_only" => state.config.onebot_at_only = value == "true" || value == "1" || value == "on",
                 "admins" => {
                     state.config.admins = value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
                     return vec![format!("管理员列表已更新: {:?}", state.config.admins)];
