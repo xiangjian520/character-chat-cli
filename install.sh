@@ -129,19 +129,24 @@ pick_mirror() {
 
     local fastest_url=""
     local fastest_time=999
+    local valid_urls=()
 
     for url in "${MIRRORS[@]}"; do
         printf "  ${CYAN}▶${NC} %s ... " "$url"
-        local elapsed
-        elapsed=$(curl -sS --connect-timeout 5 --max-time 10 \
-                   -w '%{time_total}' -o /dev/null "$url/info/refs?service=git-upload-pack" 2>/dev/null || echo "999")
-        if [ "$elapsed" = "999" ]; then
-            echo -e "${RED}超时${NC}"
+        local code elapsed
+        read -r code elapsed <<<"$(
+            curl -sS --connect-timeout 5 --max-time 10 \
+                 -w '%{http_code} %{time_total}' -o /dev/null \
+                 "$url/info/refs?service=git-upload-pack" 2>/dev/null || echo "999 999"
+        )"
+        if [ "$code" != "200" ] || [ "$elapsed" = "999" ]; then
+            echo -e "${RED}不可用 (HTTP ${code})${NC}"
             continue
         fi
         local t_ms
         t_ms=$(awk "BEGIN {printf \"%.0f\", $elapsed * 1000}")
         echo -e "${GREEN}${t_ms}ms${NC}"
+        valid_urls+=("$url")
         if awk "BEGIN {exit !($elapsed < $fastest_time)}"; then
             fastest_time="$elapsed"
             fastest_url="$url"
@@ -157,19 +162,43 @@ pick_mirror() {
     info "选择: ${REPO_URL}"
 }
 
-# 克隆仓库
+# 克隆仓库（失败自动回退到下一个镜像）
 clone_repo() {
     header "克隆仓库"
+
     if [ -d "$INSTALL_DIR/.git" ]; then
         info "仓库已存在, 更新..."
         git -C "$INSTALL_DIR" fetch origin "$BRANCH"
         git -C "$INSTALL_DIR" checkout "$BRANCH"
         git -C "$INSTALL_DIR" pull origin "$BRANCH" 2>/dev/null || true
-    else
-        rm -rf "$INSTALL_DIR"
-        git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
+        cd "$INSTALL_DIR"
+        return
     fi
-    cd "$INSTALL_DIR"
+
+    rm -rf "$INSTALL_DIR"
+
+    # 用最快的 URL 优先，失败则依次回退
+    local try_urls=("$REPO_URL")
+    if [ ${#valid_urls[@]} -gt 0 ]; then
+        # 把测速通过的其他 URL 也加入回退列表（去重）
+        for u in "${valid_urls[@]}"; do
+            [[ "$u" != "$REPO_URL" ]] && try_urls+=("$u")
+        done
+    fi
+    # GitHub 官方作为最后兜底
+    [[ "$REPO_URL" != "${MIRRORS[-1]}" ]] && try_urls+=("${MIRRORS[-1]}")
+
+    for url in "${try_urls[@]}"; do
+        info "尝试: ${url}"
+        if git clone --depth 1 --branch "$BRANCH" "$url" "$INSTALL_DIR" 2>/dev/null; then
+            cd "$INSTALL_DIR"
+            return
+        fi
+        warn "克隆失败, 尝试下一个镜像..."
+        rm -rf "$INSTALL_DIR"
+    done
+
+    error "所有镜像均克隆失败，请检查网络"
 }
 
 # 编译
