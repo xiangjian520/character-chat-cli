@@ -1,6 +1,10 @@
-# Character-Chat CLI v0.1.1
+# Character-Chat CLI
 
-基于 DeepSeek API 的 AI 角色扮演对话客户端，支持多协议接入（QQ、微信、OneBot 11）、TTS 语音合成、动态插件系统。
+基于OpenAI格式（目前只支持OpenAI格式）的API的 AI 角色扮演对话客户端，支持多协议接入（QQ、微信、OneBot 11）、TTS 语音合成、动态插件系统。
+
+对了，我们非常**快**！！！
+
+注意！Windows和Linux的插件不通用，需要额外编译
 
 ## 功能
 
@@ -9,7 +13,7 @@
 - **QQ 机器人** — 通过 QQ 官方 API 接入私聊消息，自动 AI 回复，支持语音
 - **微信机器人** — 通过自定义 API 接入，QR 码扫码登录
 - **OneBot 11 协议** — 反向 WebSocket 服务端，兼容 go-cqhttp / NapCat 等实现
-- **GPT-SoVITS TTS** — 连接本地 TTS 服务，命令行文字转语音，机器人自动语音回复
+- **GPT-SoVITS TTS** — 连接本地 TTS 服务，命令行文字转语音，机器人自动语音回复（需要**额外部署**，需要一定的**算力**）
 - **动态插件** — `plugins/*.dll` (Windows) / `plugins/*.so` (Linux) 即插即用，启动时自动发现加载，C ABI 接口
 - **管理员系统** — 白名单模式，管理员可通过消息远程执行命令
 - **Redis 会话管理** — 使用 Redis 持久化聊天记录与机器人会话上下文
@@ -22,10 +26,18 @@
 - Rust 工具链（[rustup](https://rustup.rs)）
 - DeepSeek API Key（[获取](https://platform.deepseek.com)）
 - Redis 服务（默认 `127.0.0.1:6379`）
-- （可选）GPT-SoVITS 服务用于 TTS
-- （可选）QQ / 微信 / OneBot 实现端用于机器人接入
+- GPT-SoVITS 服务用于 TTS
+- QQ / 微信 / OneBot 实现端用于机器人接入
+- Windows可以使用[Windows安装程序](https://github.com/xiangjian520/character-chat-cli/releases/tag/release)
+- Linux可以使用一键脚本
 
-### 编译运行
+
+
+### linux安装脚本(支持大多数发行版)
+
+    curl -fsSL https://github.com/xiangjian520/character-chat-cli/raw/master/install.sh | bash 
+
+### 编译运行（未在MacOS测试过）
 
 ```bash
 git clone https://github.com/xiangjian520/character-chat-cli.git
@@ -43,7 +55,7 @@ cargo run --release
 
 ### 配置
 
-首次运行自动生成 `config.json`，或手动创建：
+首次运行自动生成 `config.json`，或手动创建（当然，随便你）：
 
 ```json
 {
@@ -68,10 +80,10 @@ sudo apt install redis && sudo systemctl start redis
 brew install redis && brew services start redis
 
 # Windows
-# 下载: https://github.com/microsoftarchive/redis/releases
+#Windows下载Windows版redis
 ```
 
-## 命令一览
+## 命令一览（部分键值不在）
 
 ```
 /help | /?            显示帮助
@@ -123,8 +135,7 @@ brew install redis && brew services start redis
 
 ```
 personas/
-  雌小鬼人设.txt
-  cyrene.txt
+    ****.txt
 ```
 
 `/persona set <名称>` 切换后自动保存到 config.json，下次启动沿用。
@@ -135,10 +146,10 @@ personas/
 
 两种方式：
 
-| 方式 | 位置 | 适用场景 |
-|------|------|----------|
-| 编译时 | `src/plugins/*.rs` | 内置功能，需重新编译 |
-| 动态 | `plugins/*.dll` / `plugins/*.so` | 用户扩展，即插即用 |
+| 方式  | 位置                               | 适用场景       |
+| --- | -------------------------------- | ---------- |
+| 编译时 | `src/plugins/*.rs`               | 内置功能，需重新编译 |
+| 动态  | `plugins/*.dll` / `plugins/*.so` | 用户扩展，即插即用  |
 
 动态插件只需把 `.dll` (Windows) / `.so` (Linux) 放入 `plugins/` 目录，启动时自动发现并启用。禁用需在 `config.json` 中显式设置 `"plugins":{"xxx":{"enabled":false}}`。
 
@@ -179,9 +190,11 @@ sudo pacman -S base-devel openssl pkg-config alsa-lib
 
 ### Windows
 
+* Windows可以使用安装程序
 - 无需额外系统依赖，可直接编译
 - 动态插件使用 `.dll` 后缀
 - 编译时如遇 `拒绝访问 (os error 5)`，请先关闭已运行的实例：
+  
   ```
   taskkill /F /IM character-chat-cli.exe
   ```
