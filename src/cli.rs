@@ -223,7 +223,7 @@ fn help_text() -> Vec<String> {
 
 async fn cmd_chat(parts: &[String], state: &mut AppState) -> Vec<String> {
     if state.config.api_key().is_empty() {
-        return vec!["错误: 未设置 API Key，请设置环境变量 DEEPSEEK_API_KEY".to_string()];
+        return vec![format!("错误: 未设置 API Key，请设置环境变量 {}", state.config.api_key_env)];
     }
 
     let (stream, text) = if parts.len() >= 2 && parts[1] == "stream" {
@@ -383,12 +383,13 @@ async fn cmd_config(parts: &[String], state: &mut AppState) -> Vec<String> {
             let tts_status = if state.tts.connected { "已连接" } else { "未连接" };
             let key_display = match cfg.api_key_source() {
                 "config" => format!("{} (配置文件)", mask_key(&cfg.api_key)),
-                "env" => format!("{} (环境变量)", mask_key(&cfg.api_key())),
+                "env" => format!("{} (环境变量 {})", mask_key(&cfg.api_key()), cfg.api_key_env),
                 _ => "未设置".to_string(),
             };
             vec![
                 "═══════ 当前配置 ═══════".to_string(),
                 format!("api_key:       {}", key_display),
+                format!("api_key_env:   {}", cfg.api_key_env),
                 format!("api_url:       {}", cfg.api_url),
                 format!("model:         {}", cfg.model),
                 format!("max_tokens:    {}", cfg.max_tokens),
@@ -424,6 +425,12 @@ async fn cmd_config(parts: &[String], state: &mut AppState) -> Vec<String> {
                     state.config.api_key = value;
                     let _ = state.config.save("config.json");
                     return vec!["API Key 已设置并保存到配置文件".to_string()];
+                }
+                "api_key_env" => {
+                    let v = value.clone();
+                    state.config.api_key_env = value;
+                    let _ = state.config.save("config.json");
+                    return vec![format!("API Key 环境变量名已设置为: {}", v)];
                 }
                 "api_url" => state.config.api_url = value,
                 "model" => state.config.model = value,
@@ -726,7 +733,6 @@ fn cmd_qq(state: &AppState) -> Vec<String> {
 
 fn cmd_onebot(state: &AppState) -> Vec<String> {
     vec![
-        format!("OneBot WS 服务: {}", if state.config.onebot_enabled { "已启用" } else { "未启用" }),
         format!("WebSocket 端口: {}", state.config.onebot_ws_port),
         "".to_string(),
         "使用 /onebot start 启动 OneBot WS 服务".to_string(),

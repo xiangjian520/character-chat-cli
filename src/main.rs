@@ -165,6 +165,172 @@ async fn main() {
             if state.config.auto_start_onebot { "开启" } else { "关闭" },
             if state.config.auto_start_qq { "开启" } else { "关闭" },
             if state.config.auto_start_wechat { "开启" } else { "关闭" });
+
+        // Auto-start OneBot
+        if state.config.auto_start_onebot {
+            let ob_api_key = state.config.api_key();
+            let ob_api_url = state.config.api_url.clone();
+            let ob_model = state.config.model.clone();
+            let ob_max_tokens = state.config.max_tokens;
+            let ob_temperature = state.config.temperature;
+            let ob_top_p = state.config.top_p;
+            let ob_system_prompt = state.system_prompt();
+            let ob_active_persona = state.active_persona.clone();
+            let ob_tts_cfg = if state.config.qq_voice_enabled {
+                Some(state.tts.build_config())
+            } else {
+                None
+            };
+            let ob_store = state.store.clone();
+            let ob_bind_addr = format!("127.0.0.1:{}", state.config.onebot_ws_port);
+            let ob_at_only = state.config.onebot_at_only;
+            let ob_ev_tx = ob_event_tx.clone();
+            let ob_conn = ob_connections.clone();
+            let ob_admins = admins.clone();
+            let ob_blacklist = blacklist.clone();
+            let ob_admin_tx = admin_tx.clone();
+            let ob_plugin_mgr = state.plugin_mgr.clone();
+
+            let (ob_stop, mut ob_stop_rx) = tokio::sync::watch::channel(false);
+            ob_stop_tx = Some(ob_stop);
+            ob_running.store(true, std::sync::atomic::Ordering::SeqCst);
+
+            tokio::spawn(async move {
+                let (inner_tx, mut inner_rx) = mpsc::unbounded_channel::<onebot::types::OneBotEvent>();
+                let server_ev_tx = inner_tx.clone();
+                let server_conn = ob_conn.clone();
+                let server_stop = ob_stop_rx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = onebot::server::run_server(
+                        ob_bind_addr, server_ev_tx, server_conn, server_stop,
+                    ).await {
+                        eprintln!("[onebot] 服务端错误: {}", e);
+                    }
+                });
+
+                let mut handler: Option<onebot::bot::OneBotHandler> = None;
+                loop {
+                    tokio::select! {
+                        _ = ob_stop_rx.changed() => break,
+                        event = inner_rx.recv() => {
+                            match event {
+                                Some(e) => {
+                                    let self_id = e.self_id.unwrap_or(0);
+                                    if handler.is_none() && self_id != 0 {
+                                        let mut h = onebot::bot::OneBotHandler::new(
+                                            self_id,
+                                            ob_conn.clone(),
+                                            ob_store.clone(),
+                                            ob_ev_tx.clone(),
+                                        );
+                                        h.tts_config = ob_tts_cfg.clone();
+                                        h.at_only = ob_at_only;
+                                        h.admins = ob_admins.clone();
+                                        h.blacklist = ob_blacklist.clone();
+                                        h.admin_tx = Some(ob_admin_tx.clone());
+                                        h.plugin_mgr = Some(ob_plugin_mgr.clone());
+                                        handler = Some(h);
+                                    }
+                                    if let Some(ref h) = handler {
+                                        h.handle_event(
+                                            e,
+                                            &ob_api_key, &ob_api_url, &ob_model,
+                                            ob_max_tokens, ob_temperature, ob_top_p,
+                                            ob_system_prompt.as_deref(),
+                                        ).await;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            });
+
+            eprintln!("[auto-start] OneBot 已启动");
+        }
+
+        // Auto-start QQ
+        if state.config.auto_start_qq
+            && !state.config.qq_app_id.is_empty()
+            && !state.config.qq_app_secret.is_empty()
+        {
+            let qq_app_id = state.config.qq_app_id.clone();
+            let qq_app_secret = state.config.qq_app_secret.clone();
+            let qq_store = state.store.clone();
+            let qq_api_key = state.config.api_key();
+            let qq_api_url = state.config.api_url.clone();
+            let qq_model = state.config.model.clone();
+            let qq_max_tokens = state.config.max_tokens;
+            let qq_temperature = state.config.temperature;
+            let qq_top_p = state.config.top_p;
+            let qq_system_prompt = state.system_prompt();
+            let qq_ev_tx = qq_event_tx.clone();
+            let qq_tts_cfg = if state.config.qq_voice_enabled {
+                Some(state.tts.build_config())
+            } else {
+                None
+            };
+            let qq_admins = admins.clone();
+            let qq_blacklist = blacklist.clone();
+            let qq_admin_tx = admin_tx.clone();
+            let qq_plugin_mgr = state.plugin_mgr.clone();
+
+            let (qq_stop, qq_stop_rx) = tokio::sync::watch::channel(false);
+            qq_stop_tx = Some(qq_stop);
+            state.qq_running = true;
+
+            tokio::spawn(async move {
+                let mut bot = qq::bot::QqBot::new(qq_app_id, qq_app_secret, qq_store, qq_ev_tx);
+                bot.tts_config = qq_tts_cfg;
+                bot.admins = qq_admins;
+                bot.blacklist = qq_blacklist;
+                bot.admin_tx = Some(qq_admin_tx);
+                bot.plugin_mgr = Some(qq_plugin_mgr);
+                let _ = bot.start(
+                    qq_api_key, qq_api_url, qq_model, qq_max_tokens, qq_temperature, qq_top_p,
+                    qq_system_prompt, qq_stop_rx,
+                ).await;
+            });
+
+            eprintln!("[auto-start] QQ 已启动");
+        }
+
+        // Auto-start WeChat
+        if state.config.auto_start_wechat && state.wechat_logged_in {
+            let wx_creds = state.wechat_credentials.clone().unwrap();
+            let wx_api_key = state.config.api_key();
+            let wx_api_url = state.config.api_url.clone();
+            let wx_model = state.config.model.clone();
+            let wx_max_tokens = state.config.max_tokens;
+            let wx_temperature = state.config.temperature;
+            let wx_top_p = state.config.top_p;
+            let wx_system_prompt = state.system_prompt();
+            let wx_store = state.store.clone();
+            let wx_ev_tx = wechat_event_tx.clone();
+            let wx_admins = admins.clone();
+            let wx_blacklist = blacklist.clone();
+            let wx_admin_tx = admin_tx.clone();
+            let wx_plugin_mgr = state.plugin_mgr.clone();
+
+            let (wx_stop, wx_stop_rx) = tokio::sync::watch::channel(false);
+            wechat_stop_tx = Some(wx_stop);
+            state.wechat_running = true;
+
+            tokio::spawn(async move {
+                let mut bot = wechat::bot::WeChatBot::new(wx_creds, wx_store, wx_ev_tx);
+                bot.admins = wx_admins;
+                bot.blacklist = wx_blacklist;
+                bot.admin_tx = Some(wx_admin_tx);
+                bot.plugin_mgr = Some(wx_plugin_mgr);
+                bot.start(
+                    wx_api_key, wx_api_url, wx_model, wx_max_tokens, wx_temperature, wx_top_p,
+                    wx_system_prompt, wx_stop_rx,
+                ).await;
+            });
+
+            eprintln!("[auto-start] WeChat 已启动");
+        }
     }
 
     loop {

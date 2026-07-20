@@ -9,6 +9,8 @@ pub struct Config {
     pub api_key: String,
     #[serde(default = "default_api_url")]
     pub api_url: String,
+    #[serde(default = "default_api_key_env")]
+    pub api_key_env: String,
     #[serde(default = "default_model")]
     pub model: String,
     #[serde(default = "default_max_tokens")]
@@ -45,8 +47,6 @@ pub struct Config {
     pub qq_app_secret: String,
     #[serde(default)]
     pub qq_voice_enabled: bool,
-    #[serde(default)]
-    pub onebot_enabled: bool,
     #[serde(default = "default_onebot_port")]
     pub onebot_ws_port: u16,
     #[serde(default)]
@@ -70,8 +70,9 @@ pub struct Config {
 fn default_redis_url() -> String { "redis://127.0.0.1:6379".into() }
 
 fn default_api_key() -> String { String::new() }
-fn default_api_url() -> String { "https://api.deepseek.com/v1/chat/completions".into() }
-fn default_model() -> String { "deepseek-chat".into() }
+fn default_api_url() -> String { "https://api.openai.com/v1/chat/completions".into() }
+fn default_model() -> String { "gpt-4o-mini".into() }
+fn default_api_key_env() -> String { "OPENAI_API_KEY".into() }
 fn default_max_tokens() -> u32 { 4096 }
 fn default_temperature() -> f32 { 1.0 }
 fn default_top_p() -> f32 { 1.0 }
@@ -85,6 +86,7 @@ impl Default for Config {
         Self {
             api_key: default_api_key(),
             api_url: default_api_url(),
+            api_key_env: default_api_key_env(),
             model: default_model(),
             max_tokens: default_max_tokens(),
             temperature: default_temperature(),
@@ -103,7 +105,6 @@ impl Default for Config {
             qq_app_id: String::new(),
             qq_app_secret: String::new(),
             qq_voice_enabled: false,
-            onebot_enabled: false,
             onebot_ws_port: default_onebot_port(),
             onebot_at_only: false,
             admins: Vec::new(),
@@ -122,14 +123,14 @@ impl Config {
         if !self.api_key.is_empty() {
             self.api_key.clone()
         } else {
-            std::env::var("DEEPSEEK_API_KEY").unwrap_or_default()
+            std::env::var(&self.api_key_env).unwrap_or_default()
         }
     }
 
     pub fn api_key_source(&self) -> &'static str {
         if !self.api_key.is_empty() {
             "config"
-        } else if std::env::var("DEEPSEEK_API_KEY").is_ok() {
+        } else if std::env::var(&self.api_key_env).is_ok() {
             "env"
         } else {
             "none"
