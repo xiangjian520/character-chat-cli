@@ -54,6 +54,12 @@ impl Prompt for SimplePrompt {
     }
 }
 
+#[derive(Debug)]
+enum CliInput {
+    Line(String),
+    Exit,
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -149,14 +155,31 @@ async fn main() {
     // Admin command channel (shared across all bots)
     let (admin_tx, mut admin_rx) = mpsc::unbounded_channel::<cli::AdminCmd>();
 
+    // CLI input channel — background thread reads Reedline, sends here
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<CliInput>();
+
     let admins = state.config.admins.clone();
     let blacklist = state.config.blacklist.clone();
 
-    // Reedline setup
-    let mut line_editor = Reedline::create();
-    let prompt = SimplePrompt {
-        text: "character-chat> ".to_string(),
-    };
+    // Spawn CLI input reader in a background thread so it doesn't block async tasks
+    std::thread::spawn(move || {
+        let mut line_editor = Reedline::create();
+        let prompt = SimplePrompt {
+            text: "character-chat> ".to_string(),
+        };
+        loop {
+            match line_editor.read_line(&prompt) {
+                Ok(Signal::Success(buf)) => {
+                    let _ = input_tx.send(CliInput::Line(buf.trim().to_string()));
+                }
+                Ok(Signal::CtrlD) | Ok(Signal::CtrlC) => {
+                    let _ = input_tx.send(CliInput::Exit);
+                    break;
+                }
+                Err(_) => {}
+            }
+        }
+    });
 
     // Auto-start bots
     let auto_start = state.config.auto_start_onebot || state.config.auto_start_qq || state.config.auto_start_wechat;
@@ -334,387 +357,328 @@ async fn main() {
     }
 
     loop {
-        // Process QQ events (non-blocking)
-        while let Ok(event) = qq_event_rx.try_recv() {
-            match event {
-                qq::QqEvent::MessageReceived { from_user, text } => {
-                    eprintln!("\n[QQ] <{}>: {}", safe_truncate(&from_user, 16), text);
+        // Process bot events + admin commands + CLI input concurrently
+        tokio::select! {
+            // QQ events (non-blocking batch)
+            _ = async {
+                while let Ok(event) = qq_event_rx.try_recv() {
+                    match event {
+                        qq::QqEvent::MessageReceived { from_user, text } => {
+                            eprintln!("\n[QQ] <{}>: {}", safe_truncate(&from_user, 16), text);
+                        }
+                        qq::QqEvent::BotReply { to_user: _, text } => {
+                            eprintln!("\n[QQ] 机器人回复: {}", safe_truncate(&text, 100));
+                        }
+                        qq::QqEvent::Error(e) => {
+                            eprintln!("\n[QQ] 错误: {}", e);
+                        }
+                        qq::QqEvent::Connected { username } => {
+                            eprintln!("\n[QQ] 已连接, 用户: {}", username);
+                            qq_running.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        qq::QqEvent::Disconnected => {
+                            eprintln!("\n[QQ] 已断开");
+                            qq_running.store(false, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        qq::QqEvent::StatusChanged { running } => {
+                            state.qq_running = running;
+                            eprintln!("\n[QQ] 状态: {}", if running { "运行中" } else { "已停止" });
+                        }
+                        _ => {}
+                    }
                 }
-                qq::QqEvent::BotReply { to_user: _, text } => {
-                    eprintln!("\n[QQ] 机器人回复: {}", safe_truncate(&text, 100));
+            } => {}
+
+            // WeChat events (non-blocking batch)
+            _ = async {
+                while let Ok(event) = wechat_event_rx.try_recv() {
+                    match event {
+                        wechat::WeChatEvent::MessageReceived { from_user, text } => {
+                            eprintln!("\n[微信] <{}>: {}", safe_truncate(&from_user, 16), text);
+                        }
+                        wechat::WeChatEvent::BotReply { to_user: _, text } => {
+                            eprintln!("\n[微信] 机器人回复: {}", safe_truncate(&text, 100));
+                        }
+                        wechat::WeChatEvent::BotError(e) => {
+                            eprintln!("\n[微信] 错误: {}", e);
+                        }
+                        wechat::WeChatEvent::BotStatus { running } => {
+                            state.wechat_running = running;
+                            eprintln!("\n[微信] 状态: {}", if running { "运行中" } else { "已停止" });
+                        }
+                        _ => {}
+                    }
                 }
-                qq::QqEvent::Error(e) => {
-                    eprintln!("\n[QQ] 错误: {}", e);
+            } => {}
+
+            // OneBot events (non-blocking batch)
+            _ = async {
+                while let Ok(event) = ob_event_rx.try_recv() {
+                    match event {
+                        onebot::ObEvent::MessageReceived { self_id: _, user_id, group_id: _, text, .. } => {
+                            eprintln!("\n[OneBot] <{}>: {}", user_id, text);
+                        }
+                        onebot::ObEvent::BotReply { user_id: _, text, .. } => {
+                            eprintln!("\n[OneBot] 机器人回复: {}", safe_truncate(&text, 100));
+                        }
+                        onebot::ObEvent::Error(e) => {
+                            eprintln!("\n[OneBot] 错误: {}", e);
+                        }
+                        onebot::ObEvent::StatusChanged { running } => {
+                            ob_running.store(running, std::sync::atomic::Ordering::SeqCst);
+                            eprintln!("\n[OneBot] 状态: {}", if running { "运行中" } else { "已停止" });
+                        }
+                    }
                 }
-                qq::QqEvent::Connected { username } => {
-                    eprintln!("\n[QQ] 已连接, 用户: {}", username);
-                    qq_running.store(true, std::sync::atomic::Ordering::SeqCst);
+            } => {}
+
+            // Admin commands from bots (now async, not blocked by CLI)
+            cmd = admin_rx.recv() => {
+                if let Some(cmd) = cmd {
+                    if cmd.command == "/onebot stop" || cmd.command.starts_with("/onebot stop") {
+                        ob_running.store(false, std::sync::atomic::Ordering::SeqCst);
+                        if let Some(tx) = ob_stop_tx.take() {
+                            let _ = tx.send(true);
+                        }
+                        let _ = cmd.reply_tx.send("OneBot 已停止".to_string());
+                        continue;
+                    }
+                    let results = cli::handle_command(&cmd.command, &mut state).await;
+                    let reply = results.join("\n");
+                    let _ = cmd.reply_tx.send(reply);
                 }
-                qq::QqEvent::Disconnected => {
-                    eprintln!("\n[QQ] 已断开");
-                    qq_running.store(false, std::sync::atomic::Ordering::SeqCst);
-                }
-                qq::QqEvent::StatusChanged { running } => {
-                    state.qq_running = running;
-                    eprintln!("\n[QQ] 状态: {}", if running { "运行中" } else { "已停止" });
-                }
-                _ => {}
             }
-        }
 
-        // Process WeChat events (non-blocking)
-        while let Ok(event) = wechat_event_rx.try_recv() {
-            match event {
-                wechat::WeChatEvent::MessageReceived { from_user, text } => {
-                    eprintln!("\n[微信] <{}>: {}", safe_truncate(&from_user, 16), text);
-                }
-                wechat::WeChatEvent::BotReply { to_user: _, text } => {
-                    eprintln!("\n[微信] 机器人回复: {}", safe_truncate(&text, 100));
-                }
-                wechat::WeChatEvent::BotError(e) => {
-                    eprintln!("\n[微信] 错误: {}", e);
-                }
-                wechat::WeChatEvent::BotStatus { running } => {
-                    state.wechat_running = running;
-                    eprintln!("\n[微信] 状态: {}", if running { "运行中" } else { "已停止" });
-                }
-                _ => {}
-            }
-        }
+            // CLI input from background thread
+            input = input_rx.recv() => {
+                match input {
+                    Some(CliInput::Line(input)) => {
+                        if input.is_empty() { continue; }
 
-        // Process OneBot events (non-blocking)
-        while let Ok(event) = ob_event_rx.try_recv() {
-            match event {
-                onebot::ObEvent::MessageReceived { self_id: _, user_id, group_id: _, text, .. } => {
-                    eprintln!("\n[OneBot] <{}>: {}", user_id, text);
-                }
-                onebot::ObEvent::BotReply { user_id: _, text, .. } => {
-                    eprintln!("\n[OneBot] 机器人回复: {}", safe_truncate(&text, 100));
-                }
-                onebot::ObEvent::Error(e) => {
-                    eprintln!("\n[OneBot] 错误: {}", e);
-                }
-                onebot::ObEvent::StatusChanged { running } => {
-                    ob_running.store(running, std::sync::atomic::Ordering::SeqCst);
-                    eprintln!("\n[OneBot] 状态: {}", if running { "运行中" } else { "已停止" });
-                }
-            }
-        }
-
-        // Process admin commands from bots
-        while let Ok(cmd) = admin_rx.try_recv() {
-            // /onebot stop 需直接操作 stop channel，不能走 handle_command
-            if cmd.command == "/onebot stop" || cmd.command.starts_with("/onebot stop") {
-                ob_running.store(false, std::sync::atomic::Ordering::SeqCst);
-                if let Some(tx) = ob_stop_tx.take() {
-                    let _ = tx.send(true);
-                }
-                let _ = cmd.reply_tx.send("OneBot 已停止".to_string());
-                continue;
-            }
-            let results = cli::handle_command(&cmd.command, &mut state).await;
-            let reply = results.join("\n");
-            let _ = cmd.reply_tx.send(reply);
-        }
-
-        // Read input
-        let sig = line_editor.read_line(&prompt);
-        match sig {
-            Ok(Signal::Success(buffer)) => {
-                let input = buffer.trim().to_string();
-                if input.is_empty() {
-                    continue;
-                }
-
-                // Handle QQ login
-                if input == "/qq login" || input.starts_with("/qq login") {
-                    println!("正在打开 QQ 配置界面...");
-
-                    let current_app_id = state.config.qq_app_id.clone();
-                    let current_app_secret = state.config.qq_app_secret.clone();
-
-                    if let Some(qq_cfg) = qq::config_tui::run_config_tui(
-                        &current_app_id,
-                        &current_app_secret,
-                    ) {
-                        state.config.qq_app_id = qq_cfg.app_id;
-                        state.config.qq_app_secret = qq_cfg.app_secret;
-                        let _ = state.config.save("config.json");
-                        println!("\nQQ 配置已保存!");
-                    } else {
-                        println!("\n已取消配置");
-                    }
-
-                    continue;
-                }
-
-                // Handle QQ start
-                if input == "/qq start" || input.starts_with("/qq start") {
-                    if state.config.qq_app_id.is_empty() || state.config.qq_app_secret.is_empty() {
-                        println!("请先设置 QQ AppID: /config set qq_app_id <id>");
-                        continue;
-                    }
-                    if state.qq_running {
-                        println!("QQ 机器人已在运行");
-                        continue;
-                    }
-
-                    let app_id = state.config.qq_app_id.clone();
-                    let app_secret = state.config.qq_app_secret.clone();
-                    let store = state.store.clone();
-                    let api_key = state.config.api_key();
-                    let api_url = state.config.api_url.clone();
-                    let model = state.config.model.clone();
-                    let max_tokens = state.config.max_tokens;
-                    let temperature = state.config.temperature;
-                    let top_p = state.config.top_p;
-                    let system_prompt = state.system_prompt();
-                    let event_tx = qq_event_tx.clone();
-                    let tts_config = if state.config.qq_voice_enabled {
-                        Some(state.tts.build_config())
-                    } else {
-                        None
-                    };
-                    let admins_clone = admins.clone();
-                    let blacklist_clone = blacklist.clone();
-                    let admin_tx_clone = admin_tx.clone();
-                    let plugin_mgr_clone = state.plugin_mgr.clone();
-
-                    let (qq_stop, qq_stop_rx) = tokio::sync::watch::channel(false);
-                    qq_stop_tx = Some(qq_stop);
-
-                    state.qq_running = true;
-
-                    tokio::spawn(async move {
-                        let mut bot = qq::bot::QqBot::new(app_id, app_secret, store, event_tx);
-                        bot.tts_config = tts_config;
-                        bot.admins = admins_clone;
-                        bot.blacklist = blacklist_clone;
-                        bot.admin_tx = Some(admin_tx_clone);
-                        bot.plugin_mgr = Some(plugin_mgr_clone);
-                        let _ = bot.start(
-                            api_key, api_url, model, max_tokens, temperature, top_p,
-                            system_prompt, qq_stop_rx,
-                        ).await;
-                    });
-
-                    println!("QQ 机器人已启动");
-                    continue;
-                }
-
-                // Handle QQ stop
-                if input == "/qq stop" || input.starts_with("/qq stop") {
-                    state.qq_running = false;
-                    if let Some(tx) = qq_stop_tx.take() {
-                        let _ = tx.send(true);
-                    }
-                    println!("QQ 机器人已停止");
-                    continue;
-                }
-
-                // Handle WeChat start
-                if input == "/wechat start" || input == "/wx start"
-                    || input.starts_with("/wechat start") || input.starts_with("/wx start")
-                {
-                    if !state.wechat_logged_in {
-                        println!("请先登录微信: /wechat login");
-                        continue;
-                    }
-                    if state.wechat_running {
-                        println!("微信机器人已在运行");
-                        continue;
-                    }
-
-                    let creds = state.wechat_credentials.clone().unwrap();
-                    let api_key = state.config.api_key();
-                    let api_url = state.config.api_url.clone();
-                    let model = state.config.model.clone();
-                    let max_tokens = state.config.max_tokens;
-                    let temperature = state.config.temperature;
-                    let top_p = state.config.top_p;
-                    let system_prompt = state.system_prompt();
-                    let store = state.store.clone();
-                    let event_tx = wechat_event_tx.clone();
-                    let admins_wx = admins.clone();
-                    let blacklist_wx = blacklist.clone();
-                    let admin_tx_wx = admin_tx.clone();
-                    let plugin_mgr_wx = state.plugin_mgr.clone();
-
-                    let (wx_stop, wx_stop_rx) = tokio::sync::watch::channel(false);
-                    wechat_stop_tx = Some(wx_stop);
-
-                    state.wechat_running = true;
-
-                    tokio::spawn(async move {
-                        let mut bot = wechat::bot::WeChatBot::new(creds, store, event_tx);
-                        bot.admins = admins_wx;
-                        bot.blacklist = blacklist_wx;
-                        bot.admin_tx = Some(admin_tx_wx);
-                        bot.plugin_mgr = Some(plugin_mgr_wx);
-                        bot.start(
-                            api_key, api_url, model, max_tokens, temperature, top_p,
-                            system_prompt, wx_stop_rx,
-                        )
-                        .await;
-                    });
-
-                    println!("微信机器人已启动! 输入 /wechat stop 停止");
-                    continue;
-                }
-
-                // Handle WeChat stop
-                if input == "/wechat stop" || input == "/wx stop"
-                    || input.starts_with("/wechat stop") || input.starts_with("/wx stop")
-                {
-                    state.wechat_running = false;
-                    if let Some(tx) = wechat_stop_tx.take() {
-                        let _ = tx.send(true);
-                    }
-                    println!("微信机器人停止信号已发送");
-                    continue;
-                }
-
-                // Handle OneBot start
-                if input == "/onebot start" || input.starts_with("/onebot start") {
-                    if ob_running.load(std::sync::atomic::Ordering::SeqCst) {
-                        println!("OneBot 已在运行");
-                        continue;
-                    }
-
-                    let api_key = state.config.api_key();
-                    let api_url = state.config.api_url.clone();
-                    let model = state.config.model.clone();
-                    let max_tokens = state.config.max_tokens;
-                    let temperature = state.config.temperature;
-                    let top_p = state.config.top_p;
-                    let system_prompt = state.system_prompt();
-                    let active_persona = state.active_persona.clone();
-                    let tts_config = if state.config.qq_voice_enabled {
-                        Some(state.tts.build_config())
-                    } else {
-                        None
-                    };
-                    let store = state.store.clone();
-                    let bind_addr = format!("127.0.0.1:{}", state.config.onebot_ws_port);
-                    let ob_at_only = state.config.onebot_at_only;
-                    let ob_tx_for_handler = ob_event_tx.clone();
-                    let connections = ob_connections.clone();
-
-                    let (ob_stop, mut ob_stop_rx) = tokio::sync::watch::channel(false);
-
-                    ob_stop_tx = Some(ob_stop);
-
-                    ob_running.store(true, std::sync::atomic::Ordering::SeqCst);
-
-                    let ob_admins = admins.clone();
-                    let ob_blacklist = blacklist.clone();
-                    let ob_admin_tx = admin_tx.clone();
-                    let ob_plugin_mgr = state.plugin_mgr.clone();
-
-                    tokio::spawn(async move {
-                        let (inner_tx, mut inner_rx) = mpsc::unbounded_channel::<onebot::types::OneBotEvent>();
-                        let server_event_tx = inner_tx.clone();
-
-                        let server_connections = connections.clone();
-                        let server_stop_rx = ob_stop_rx.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = onebot::server::run_server(
-                                bind_addr, server_event_tx, server_connections, server_stop_rx,
-                            ).await {
-                                eprintln!("[onebot] 服务端错误: {}", e);
+                        // Handle QQ login
+                        if input == "/qq login" || input.starts_with("/qq login") {
+                            println!("正在打开 QQ 配置界面...");
+                            let current_app_id = state.config.qq_app_id.clone();
+                            let current_app_secret = state.config.qq_app_secret.clone();
+                            if let Some(qq_cfg) = qq::config_tui::run_config_tui(
+                                &current_app_id, &current_app_secret,
+                            ) {
+                                state.config.qq_app_id = qq_cfg.app_id;
+                                state.config.qq_app_secret = qq_cfg.app_secret;
+                                let _ = state.config.save("config.json");
+                                println!("\nQQ 配置已保存!");
+                            } else {
+                                println!("\n已取消配置");
                             }
-                        });
+                            continue;
+                        }
 
-                        let mut handler: Option<onebot::bot::OneBotHandler> = None;
+                        // Handle QQ start
+                        if input == "/qq start" || input.starts_with("/qq start") {
+                            if state.config.qq_app_id.is_empty() || state.config.qq_app_secret.is_empty() {
+                                println!("请先设置 QQ AppID: /config set qq_app_id <id>");
+                                continue;
+                            }
+                            if state.qq_running {
+                                println!("QQ 机器人已在运行");
+                                continue;
+                            }
+                            let app_id = state.config.qq_app_id.clone();
+                            let app_secret = state.config.qq_app_secret.clone();
+                            let s = state.store.clone();
+                            let api_key = state.config.api_key();
+                            let api_url = state.config.api_url.clone();
+                            let model = state.config.model.clone();
+                            let max_tokens = state.config.max_tokens;
+                            let temperature = state.config.temperature;
+                            let top_p = state.config.top_p;
+                            let system_prompt = state.system_prompt();
+                            let event_tx = qq_event_tx.clone();
+                            let tts_config = if state.config.qq_voice_enabled {
+                                Some(state.tts.build_config())
+                            } else { None };
+                            let admins_clone = admins.clone();
+                            let blacklist_clone = blacklist.clone();
+                            let admin_tx_clone = admin_tx.clone();
+                            let plugin_mgr_clone = state.plugin_mgr.clone();
+                            let (qq_stop, qq_stop_rx) = tokio::sync::watch::channel(false);
+                            qq_stop_tx = Some(qq_stop);
+                            state.qq_running = true;
+                            tokio::spawn(async move {
+                                let mut bot = qq::bot::QqBot::new(app_id, app_secret, s, event_tx);
+                                bot.tts_config = tts_config;
+                                bot.admins = admins_clone;
+                                bot.blacklist = blacklist_clone;
+                                bot.admin_tx = Some(admin_tx_clone);
+                                bot.plugin_mgr = Some(plugin_mgr_clone);
+                                let _ = bot.start(api_key, api_url, model, max_tokens, temperature, top_p, system_prompt, qq_stop_rx).await;
+                            });
+                            println!("QQ 机器人已启动");
+                            continue;
+                        }
 
-                        loop {
-                            tokio::select! {
-                                _ = ob_stop_rx.changed() => break,
-                                event = inner_rx.recv() => {
-                                    match event {
-                                        Some(e) => {
-                                            let self_id = e.self_id.unwrap_or(0);
-                                            if handler.is_none() && self_id != 0 {
-                                                let mut h = onebot::bot::OneBotHandler::new(
-                                                    self_id,
-                                                    connections.clone(),
-                                                    store.clone(),
-                                                    ob_tx_for_handler.clone(),
-                                                );
-                                                h.tts_config = tts_config.clone();
-                                                h.at_only = ob_at_only;
-                                                h.admins = ob_admins.clone();
-                                                h.blacklist = ob_blacklist.clone();
-                                                h.admin_tx = Some(ob_admin_tx.clone());
-                                                h.plugin_mgr = Some(ob_plugin_mgr.clone());
-                                                handler = Some(h);
-                                            }
-                                            if let Some(ref h) = handler {
-                                                h.handle_event(
-                                                    e,
-                                                    &api_key, &api_url, &model,
-                                                    max_tokens, temperature, top_p,
-                                                    system_prompt.as_deref(),
-                                                ).await;
+                        // Handle QQ stop
+                        if input == "/qq stop" || input.starts_with("/qq stop") {
+                            state.qq_running = false;
+                            if let Some(tx) = qq_stop_tx.take() { let _ = tx.send(true); }
+                            println!("QQ 机器人已停止");
+                            continue;
+                        }
+
+                        // Handle WeChat start
+                        if input == "/wechat start" || input == "/wx start"
+                            || input.starts_with("/wechat start") || input.starts_with("/wx start")
+                        {
+                            if !state.wechat_logged_in {
+                                println!("请先登录微信: /wechat login");
+                                continue;
+                            }
+                            if state.wechat_running {
+                                println!("微信机器人已在运行");
+                                continue;
+                            }
+                            let creds = state.wechat_credentials.clone().unwrap();
+                            let api_key = state.config.api_key();
+                            let api_url = state.config.api_url.clone();
+                            let model = state.config.model.clone();
+                            let max_tokens = state.config.max_tokens;
+                            let temperature = state.config.temperature;
+                            let top_p = state.config.top_p;
+                            let system_prompt = state.system_prompt();
+                            let s = state.store.clone();
+                            let event_tx = wechat_event_tx.clone();
+                            let admins_wx = admins.clone();
+                            let blacklist_wx = blacklist.clone();
+                            let admin_tx_wx = admin_tx.clone();
+                            let plugin_mgr_wx = state.plugin_mgr.clone();
+                            let (wx_stop, wx_stop_rx) = tokio::sync::watch::channel(false);
+                            wechat_stop_tx = Some(wx_stop);
+                            state.wechat_running = true;
+                            tokio::spawn(async move {
+                                let mut bot = wechat::bot::WeChatBot::new(creds, s, event_tx);
+                                bot.admins = admins_wx;
+                                bot.blacklist = blacklist_wx;
+                                bot.admin_tx = Some(admin_tx_wx);
+                                bot.plugin_mgr = Some(plugin_mgr_wx);
+                                bot.start(api_key, api_url, model, max_tokens, temperature, top_p, system_prompt, wx_stop_rx).await;
+                            });
+                            println!("微信机器人已启动! 输入 /wechat stop 停止");
+                            continue;
+                        }
+
+                        // Handle WeChat stop
+                        if input == "/wechat stop" || input == "/wx stop"
+                            || input.starts_with("/wechat stop") || input.starts_with("/wx stop")
+                        {
+                            state.wechat_running = false;
+                            if let Some(tx) = wechat_stop_tx.take() { let _ = tx.send(true); }
+                            println!("微信机器人停止信号已发送");
+                            continue;
+                        }
+
+                        // Handle OneBot start
+                        if input == "/onebot start" || input.starts_with("/onebot start") {
+                            if ob_running.load(std::sync::atomic::Ordering::SeqCst) {
+                                println!("OneBot 已在运行");
+                                continue;
+                            }
+                            let api_key = state.config.api_key();
+                            let api_url = state.config.api_url.clone();
+                            let model = state.config.model.clone();
+                            let max_tokens = state.config.max_tokens;
+                            let temperature = state.config.temperature;
+                            let top_p = state.config.top_p;
+                            let system_prompt = state.system_prompt();
+                            let active_persona = state.active_persona.clone();
+                            let tts_config = if state.config.qq_voice_enabled {
+                                Some(state.tts.build_config())
+                            } else { None };
+                            let s = state.store.clone();
+                            let bind_addr = format!("127.0.0.1:{}", state.config.onebot_ws_port);
+                            let ob_at_only = state.config.onebot_at_only;
+                            let ob_tx_for_handler = ob_event_tx.clone();
+                            let connections = ob_connections.clone();
+                            let (ob_stop, mut ob_stop_rx) = tokio::sync::watch::channel(false);
+                            ob_stop_tx = Some(ob_stop);
+                            ob_running.store(true, std::sync::atomic::Ordering::SeqCst);
+                            let ob_admins = admins.clone();
+                            let ob_blacklist = blacklist.clone();
+                            let ob_admin_tx = admin_tx.clone();
+                            let ob_plugin_mgr = state.plugin_mgr.clone();
+                            tokio::spawn(async move {
+                                let (inner_tx, mut inner_rx) = mpsc::unbounded_channel::<onebot::types::OneBotEvent>();
+                                let server_event_tx = inner_tx.clone();
+                                let server_connections = connections.clone();
+                                let server_stop_rx = ob_stop_rx.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = onebot::server::run_server(bind_addr, server_event_tx, server_connections, server_stop_rx).await {
+                                        eprintln!("[onebot] 服务端错误: {}", e);
+                                    }
+                                });
+                                let mut handler: Option<onebot::bot::OneBotHandler> = None;
+                                loop {
+                                    tokio::select! {
+                                        _ = ob_stop_rx.changed() => break,
+                                        event = inner_rx.recv() => {
+                                            match event {
+                                                Some(e) => {
+                                                    let self_id = e.self_id.unwrap_or(0);
+                                                    if handler.is_none() && self_id != 0 {
+                                                        let mut h = onebot::bot::OneBotHandler::new(self_id, connections.clone(), s.clone(), ob_tx_for_handler.clone());
+                                                        h.tts_config = tts_config.clone();
+                                                        h.at_only = ob_at_only;
+                                                        h.admins = ob_admins.clone();
+                                                        h.blacklist = ob_blacklist.clone();
+                                                        h.admin_tx = Some(ob_admin_tx.clone());
+                                                        h.plugin_mgr = Some(ob_plugin_mgr.clone());
+                                                        handler = Some(h);
+                                                    }
+                                                    if let Some(ref h) = handler {
+                                                        h.handle_event(e, &api_key, &api_url, &model, max_tokens, temperature, top_p, system_prompt.as_deref()).await;
+                                                    }
+                                                }
+                                                None => break,
                                             }
                                         }
-                                        None => break,
                                     }
                                 }
-                            }
+                            });
+                            eprintln!("OneBot 已启动! 端口: {}, 角色: {}, 语音: {}",
+                                state.config.onebot_ws_port, active_persona,
+                                if state.config.qq_voice_enabled { "开启" } else { "关闭" });
+                            println!("请配置 OneBot 实现端连接 ws://127.0.0.1:{}/", state.config.onebot_ws_port);
+                            continue;
                         }
-                    });
 
-                    eprintln!("OneBot 已启动! 端口: {}, 角色: {}, 语音: {}", 
-                        state.config.onebot_ws_port,
-                        active_persona,
-                        if state.config.qq_voice_enabled { "开启" } else { "关闭" });
-                    println!("请配置 OneBot 实现端连接 ws://127.0.0.1:{}/", state.config.onebot_ws_port);
-                    continue;
-                }
+                        // Handle OneBot stop
+                        if input == "/onebot stop" || input.starts_with("/onebot stop") {
+                            ob_running.store(false, std::sync::atomic::Ordering::SeqCst);
+                            if let Some(tx) = ob_stop_tx.take() { let _ = tx.send(true); }
+                            println!("OneBot 已停止");
+                            continue;
+                        }
 
-                // Handle OneBot stop
-                if input == "/onebot stop" || input.starts_with("/onebot stop") {
-                    ob_running.store(false, std::sync::atomic::Ordering::SeqCst);
-                    if let Some(tx) = ob_stop_tx.take() {
-                        let _ = tx.send(true);
+                        // Regular command processing
+                        let results = cli::handle_command(&input, &mut state).await;
+                        for line in results {
+                            println!("{}", line);
+                        }
+                        if !state.running { break; }
+                        if input.starts_with("/config set") {
+                            let _ = state.config.save("config.json");
+                        }
                     }
-                    println!("OneBot 已停止");
-                    continue;
+                    Some(CliInput::Exit) | None => {
+                        println!("\n再见!");
+                        break;
+                    }
                 }
-
-                // Regular command processing
-                let results = cli::handle_command(&input, &mut state).await;
-                for line in results {
-                    println!("{}", line);
-                }
-
-                if !state.running {
-                    break;
-                }
-
-                if input.starts_with("/config set") {
-                    let _ = state.config.save("config.json");
-                }
-            }
-            Ok(Signal::CtrlD) | Ok(Signal::CtrlC) => {
-                println!("\n再见!");
-                break;
-            }
-            Err(e) => {
-                eprintln!("输入错误: {}", e);
-                continue;
             }
         }
     }
 
-    if let Some(tx) = qq_stop_tx {
-        let _ = tx.send(true);
-    }
-    if let Some(tx) = wechat_stop_tx {
-        let _ = tx.send(true);
-    }
+    if let Some(tx) = qq_stop_tx { let _ = tx.send(true); }
+    if let Some(tx) = wechat_stop_tx { let _ = tx.send(true); }
     state.running = false;
-
     println!("Character-Chat CLI 已退出");
 }
