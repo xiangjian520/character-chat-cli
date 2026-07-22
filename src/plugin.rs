@@ -52,6 +52,7 @@ pub trait Plugin: Send + Sync {
 pub struct DynamicPlugin {
     name: String,
     running: bool,
+    _lib: libloading::Library,
     free_str: FnFreeStr,
     init_fn: FnInit,
     start_fn: FnStart,
@@ -63,11 +64,8 @@ pub struct DynamicPlugin {
 
 impl DynamicPlugin {
     pub unsafe fn load(path: &std::path::Path) -> Result<Self, String> {
-        // leak 库以获取 'static 引用
-        let lib = Box::leak(Box::new(
-            libloading::Library::new(path)
-                .map_err(|e| format!("加载 {}: {}", path.display(), e))?
-        ));
+        let lib = libloading::Library::new(path)
+            .map_err(|e| format!("加载 {}: {}", path.display(), e))?;
 
         let name_fn: FnName = unsafe {
             let sym: libloading::Symbol<FnName> = lib.get(b"plugin_name")
@@ -120,6 +118,7 @@ impl DynamicPlugin {
         Ok(Self {
             name,
             running: false,
+            _lib: lib,
             free_str,
             init_fn,
             start_fn,

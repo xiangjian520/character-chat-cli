@@ -1,5 +1,5 @@
 use log::{error, info, warn};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, mpsc};
 use crate::api::ChatMessage;
 use crate::memory::MemoryStore;
@@ -74,14 +74,13 @@ impl QqBot {
 
         let (internal_tx, _) = broadcast::channel::<QqEvent>(256);
 
-        let access = self.access_token.clone();
-        let token = self.access_token.clone();
+        let shared_token = Arc::new(RwLock::new(self.access_token.clone()));
+
         let intents = INTENT_GROUP_AND_C2C | INTENT_AUDIO_ACTION;
         let sender_spawn = self.sender.clone();
         let gateway_stop_rx = stop_rx.clone();
         let internal_tx_clone = internal_tx.clone();
 
-        let access_for_handler = access.clone();
         let api_key_for_handler = api_key.clone();
         let api_url_for_handler = api_url.clone();
         let model_for_handler = model.clone();
@@ -96,6 +95,7 @@ impl QqBot {
         let admin_tx_for_handler = self.admin_tx.clone();
         let plugin_mgr_for_handler = self.plugin_mgr.clone();
 
+        let gateway_token = shared_token.clone();
         tokio::spawn(async move {
             loop {
                 if *gateway_stop_rx.borrow() {
@@ -103,9 +103,10 @@ impl QqBot {
                 }
                 let sender_c = sender_spawn.clone();
                 let itx = internal_tx_clone.clone();
+                let current_token = gateway_token.read().unwrap().clone();
                 let result = super::ws::run_gateway(
-                    access.clone(),
-                    token.clone(),
+                    current_token.clone(),
+                    current_token,
                     intents,
                     move |event_type, data| {
                         let event = QqEvent::Raw { event_type, data };
@@ -130,8 +131,8 @@ impl QqBot {
 
         let _ = self.sender.send(QqEvent::StatusChanged { running: true });
 
+        let handler_token = shared_token.clone();
         tokio::spawn(async move {
-            let access = access_for_handler;
             let api_key = api_key_for_handler;
             let api_url = api_url_for_handler;
             let model = model_for_handler;
@@ -150,6 +151,7 @@ impl QqBot {
                         match event {
                             Ok(QqEvent::Raw { event_type, data }) => {
                                 if event_type == "C2C_MESSAGE_CREATE" {
+                                    let access = handler_token.read().unwrap().clone();
                                     if let Ok(msg) = serde_json::from_value::<C2cMessageEvent>(data) {
                                         let from_user = msg.author.as_ref()
                                             .and_then(|a| {
@@ -312,6 +314,7 @@ impl QqBot {
         let app_secret = self.app_secret.clone();
         let mut self_expires = self.token_expires_at;
         let mut stop_rx_token = stop_rx.clone();
+        let refresh_token_arc = shared_token.clone();
 
         tokio::spawn(async move {
             loop {
@@ -326,6 +329,7 @@ impl QqBot {
                 if now >= self_expires {
                     match api::get_access_token(&app_id, &app_secret).await {
                         Ok(resp) => {
+                            *refresh_token_arc.write().unwrap() = resp.access_token;
                             self_expires = now + resp.expires_in - 300;
                             info!("[qqbot] AccessToken 已刷新");
                         }

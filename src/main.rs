@@ -359,9 +359,12 @@ async fn main() {
     loop {
         // Process bot events + admin commands + CLI input concurrently
         tokio::select! {
-            // QQ events (non-blocking batch)
-            _ = async {
-                while let Ok(event) = qq_event_rx.try_recv() {
+            // QQ events (await + batch drain)
+            qq_ev = qq_event_rx.recv() => {
+                let mut batch: Vec<qq::QqEvent> = Vec::new();
+                if let Some(e) = qq_ev { batch.push(e); }
+                while let Ok(e) = qq_event_rx.try_recv() { batch.push(e); }
+                for event in batch {
                     match event {
                         qq::QqEvent::MessageReceived { from_user, text } => {
                             eprintln!("\n[QQ] <{}>: {}", safe_truncate(&from_user, 16), text);
@@ -387,11 +390,14 @@ async fn main() {
                         _ => {}
                     }
                 }
-            } => {}
+            }
 
-            // WeChat events (non-blocking batch)
-            _ = async {
-                while let Ok(event) = wechat_event_rx.try_recv() {
+            // WeChat events (await + batch drain)
+            wx_ev = wechat_event_rx.recv() => {
+                let mut batch: Vec<wechat::WeChatEvent> = Vec::new();
+                if let Some(e) = wx_ev { batch.push(e); }
+                while let Ok(e) = wechat_event_rx.try_recv() { batch.push(e); }
+                for event in batch {
                     match event {
                         wechat::WeChatEvent::MessageReceived { from_user, text } => {
                             eprintln!("\n[微信] <{}>: {}", safe_truncate(&from_user, 16), text);
@@ -409,11 +415,14 @@ async fn main() {
                         _ => {}
                     }
                 }
-            } => {}
+            }
 
-            // OneBot events (non-blocking batch)
-            _ = async {
-                while let Ok(event) = ob_event_rx.try_recv() {
+            // OneBot events (await + batch drain)
+            ob_ev = ob_event_rx.recv() => {
+                let mut batch: Vec<onebot::ObEvent> = Vec::new();
+                if let Some(e) = ob_ev { batch.push(e); }
+                while let Ok(e) = ob_event_rx.try_recv() { batch.push(e); }
+                for event in batch {
                     match event {
                         onebot::ObEvent::MessageReceived { self_id: _, user_id, group_id: _, text, .. } => {
                             eprintln!("\n[OneBot] <{}>: {}", user_id, text);
@@ -430,7 +439,7 @@ async fn main() {
                         }
                     }
                 }
-            } => {}
+            }
 
             // Admin commands from bots (now async, not blocked by CLI)
             cmd = admin_rx.recv() => {
